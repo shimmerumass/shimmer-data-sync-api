@@ -83,10 +83,10 @@ def missing_files(filenames: List[str] = Body(...)):
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/download-all/")
-def download_all_files():
+@app.get("/download-all-url/")
+def download_all_url():
     """
-    Download all files in the S3 bucket as a single ZIP archive.
+    Create a ZIP of all S3 files, upload to S3, and return a presigned download URL.
     """
     try:
         response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
@@ -101,7 +101,16 @@ def download_all_files():
                 file_bytes = s3_obj["Body"].read()
                 zipf.writestr(key, file_bytes)
         zip_buffer.seek(0)
-        return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=all_files.zip"})
+        zip_key = "all_files.zip"
+        # Upload ZIP to S3
+        s3_client.upload_fileobj(zip_buffer, S3_BUCKET, zip_key)
+        # Generate presigned URL
+        url = s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": S3_BUCKET, "Key": zip_key},
+            ExpiresIn=3600  # 1 hour
+        )
+        return {"download_url": url}
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
