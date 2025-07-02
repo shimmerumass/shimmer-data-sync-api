@@ -1,6 +1,8 @@
 import os
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+import io
+import zipfile
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from typing import List
@@ -78,6 +80,28 @@ def missing_files(filenames: List[str] = Body(...)):
         s3_files = set(obj["Key"] for obj in response.get("Contents", []))
         missing = [f for f in filenames if f not in s3_files]
         return {"missing_files": missing}
+    except (BotoCoreError, ClientError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download-all/")
+def download_all_files():
+    """
+    Download all files in the S3 bucket as a single ZIP archive.
+    """
+    try:
+        response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
+        contents = response.get("Contents", [])
+        if not contents:
+            raise HTTPException(status_code=404, detail="No files found in S3 bucket.")
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zipf:
+            for obj in contents:
+                key = obj["Key"]
+                s3_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=key)
+                file_bytes = s3_obj["Body"].read()
+                zipf.writestr(key, file_bytes)
+        zip_buffer.seek(0)
+        return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=all_files.zip"})
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
