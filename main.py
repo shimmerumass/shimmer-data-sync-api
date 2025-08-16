@@ -24,6 +24,8 @@ app = FastAPI()
 @app.post("/upload/")
 async def upload_file(file: UploadFile = File(...)):
     try:
+        if not file.filename.endswith('.txt'):
+            raise HTTPException(status_code=400, detail="Only .txt files are allowed.")
         s3_client.upload_fileobj(file.file, S3_BUCKET, file.filename)
         return {"filename": file.filename, "message": "Upload successful"}
     except (BotoCoreError, ClientError) as e:
@@ -42,7 +44,14 @@ def list_files():
 def download_file(filename: str):
     try:
         fileobj = s3_client.get_object(Bucket=S3_BUCKET, Key=filename)["Body"]
-        return StreamingResponse(fileobj, media_type="text/plain", headers={"Content-Disposition": f"attachment; filename={filename}"})
+        return StreamingResponse(
+            fileobj,
+            media_type="text/plain",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "Content-Type": "text/plain"
+            }
+        )
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=404, detail=str(e))
 
