@@ -11,6 +11,7 @@ from typing import Dict
 from dotenv import load_dotenv
 from mangum import Mangum
 from pydantic import BaseModel
+from datetime import datetime, timezone
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -40,6 +41,7 @@ class FileItem(BaseModel):
     time: str  # HH:MM:SS
     part: Optional[str] = None
     ext: str
+    patient: Optional[str] = None
 
 def parse_file_name(key: str) -> FileItem:
     name = os.path.basename(key)
@@ -100,7 +102,31 @@ def list_files_metadata():
         response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
         contents = response.get("Contents", [])
         keys = [obj["Key"] for obj in contents]
-        return [parse_file_name(k) for k in keys]
+
+        # Load device→patient mapping from DynamoDB
+        mapping: Dict[str, str] = {}
+        table = _get_ddb_table()
+        scan_kwargs: Dict = {"ProjectionExpression": "device, patient"}
+        while True:
+            dresp = table.scan(**scan_kwargs)
+            for it in dresp.get("Items", []):
+                dev = it.get("device")
+                pat = it.get("patient")
+                if dev:
+                    # Coerce empty/None to None so API returns null
+                    mapping[dev] = pat if (pat is not None and pat != "") else None
+            if "LastEvaluatedKey" in dresp:
+                scan_kwargs["ExclusiveStartKey"] = dresp["LastEvaluatedKey"]
+            else:
+                break
+
+        items: List[FileItem] = []
+        for k in keys:
+            fi = parse_file_name(k)
+            pat = mapping.get(fi.device)
+            fi.patient = pat if (pat is not None and pat != "") else None
+            items.append(fi)
+        return items
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -222,16 +248,19 @@ def ddb_get_device_patient_map():
 
 @app.put("/ddb/device-patient-map", response_model=Dict[str, str])
 def ddb_put_device_patient_map(mapping: Dict[str, str] = Body(...)):
-    """Replace the map by writing items: { device, patient }."""
+    """Replace the map by writing items: { device, patient }. Also sets updatedAt (UTC)."""
     try:
         table = _get_ddb_table()
-        # Batch write up to 25 at a time
         devices = list(mapping.keys())
         for i in range(0, len(devices), 25):
             chunk = devices[i:i+25]
             with table.batch_writer() as batch:
                 for d in chunk:
-                    batch.put_item(Item={"device": d, "patient": mapping[d]})
+                    batch.put_item(Item={
+                        "device": d,
+                        "patient": mapping[d],
+                        "updatedAt": datetime.now(timezone.utc).isoformat()
+                    })
         return mapping
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -257,8 +286,60 @@ def ddb_put_device_mapping(device: str, payload: Dict[str, str] = Body(...)):
         raise HTTPException(status_code=400, detail="'patient' is required")
     try:
         table = _get_ddb_table()
-        table.put_item(Item={"device": device, "patient": patient})
+        table.put_item(Item={
+            "device": device,
+            "patient": patient,
+            "updatedAt": datetime.now(timezone.utc).isoformat()
+        })
         return {"device": device, "patient": patient}
+    except (BotoCoreError, ClientError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/devices/unregistered", response_model=List[str])
+def get_unregistered_devices():
+    """Return devices present in S3 filenames but missing in DynamoDB mapping."""
+    try:
+        # Collect unique devices from S3 object keys
+        devices_in_s3 = set()
+        resp = s3_client.list_objects_v2(Bucket=S3_BUCKET)
+        contents = resp.get("Contents", [])
+        for obj in contents:
+            key = obj.get("Key")
+            if not key:
+                continue
+            dev = parse_file_name(key).device
+            if dev:
+                devices_in_s3.add(dev)
+        while resp.get("IsTruncated"):
+            resp = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET,
+                ContinuationToken=resp.get("NextContinuationToken")
+            )
+            for obj in resp.get("Contents", []):
+                key = obj.get("Key")
+                if not key:
+                    continue
+                dev = parse_file_name(key).device
+                if dev:
+                    devices_in_s3.add(dev)
+
+        # Collect registered devices from DynamoDB
+        table = _get_ddb_table()
+        registered = set()
+        scan_kwargs: Dict = {"ProjectionExpression": "device"}
+        while True:
+            dresp = table.scan(**scan_kwargs)
+            for it in dresp.get("Items", []):
+                dev = it.get("device")
+                if dev:
+                    registered.add(dev)
+            if "LastEvaluatedKey" in dresp:
+                scan_kwargs["ExclusiveStartKey"] = dresp["LastEvaluatedKey"]
+            else:
+                break
+
+        missing = sorted(list(devices_in_s3 - registered))
+        return missing
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
