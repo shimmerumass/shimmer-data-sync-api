@@ -1,6 +1,7 @@
 import os
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body
 from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 import io
 import zipfile
 import boto3
@@ -20,6 +21,15 @@ S3_BUCKET = os.getenv("S3_BUCKET")
 s3_client = boto3.client("s3")
 
 app = FastAPI()
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 @app.post("/upload/")
 async def upload_file(file: UploadFile = File(...)):
