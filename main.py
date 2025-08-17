@@ -6,9 +6,10 @@ import io
 import zipfile
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from typing import List
+from typing import List, Optional
 from dotenv import load_dotenv
 from mangum import Mangum
+from pydantic import BaseModel
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -31,6 +32,48 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
+class FileItem(BaseModel):
+    name: str
+    device: str
+    date: str  # YYYY-MM-DD
+    time: str  # HH:MM:SS
+    part: Optional[str] = None
+    ext: str
+
+def parse_file_name(key: str) -> FileItem:
+    name = os.path.basename(key)
+
+    # extension from last dot
+    last_dot = name.rfind(".")
+    ext = name[last_dot + 1:] if last_dot > -1 else ""
+
+    # split into at most 4 segments: device, yyyymmdd, hhmmss, remainder (part+ext)
+    parts = name.split("_", 3)
+    device = parts[0] if len(parts) > 0 else ""
+    ymd = parts[1] if len(parts) > 1 else ""
+    hms = parts[2] if len(parts) > 2 else ""
+    remainder = parts[3] if len(parts) > 3 else ""
+
+    # date
+    yyyy = ymd[0:4] if len(ymd) >= 4 else ""
+    mm = ymd[4:6] if len(ymd) >= 6 else ""
+    dd = ymd[6:8] if len(ymd) >= 8 else ""
+    date = f"{yyyy}-{mm}-{dd}" if (yyyy and mm and dd) else ""
+
+    # time
+    hh = hms[0:2] if len(hms) >= 2 else ""
+    mi = hms[2:4] if len(hms) >= 4 else ""
+    ss = hms[4:6] if len(hms) >= 6 else ""
+    time = f"{hh}:{mi}:{ss}" if (hh and mi and ss) else ""
+
+    # part = text before first dot in the remainder (if any)
+    part = None
+    if remainder:
+        dot_idx = remainder.find(".")
+        part = remainder[:dot_idx] if dot_idx > -1 else remainder or None
+
+    return FileItem(name=name, device=device, date=date, time=time, part=part, ext=ext)
+
 @app.post("/upload/")
 async def upload_file(file: UploadFile = File(...)):
     try:
@@ -47,6 +90,16 @@ def list_files():
         response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
         contents = response.get("Contents", [])
         return [obj["Key"] for obj in contents]
+    except (BotoCoreError, ClientError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/files/metadata/", response_model=List[FileItem])
+def list_files_metadata():
+    try:
+        response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
+        contents = response.get("Contents", [])
+        keys = [obj["Key"] for obj in contents]
+        return [parse_file_name(k) for k in keys]
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
