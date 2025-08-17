@@ -330,6 +330,29 @@ def ddb_put_device_mapping(device: str, payload: Dict[str, str] = Body(...)):
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.delete("/ddb/device-patient-map/{device}")
+def ddb_delete_device_mapping(device: str):
+    try:
+        table = _get_ddb_table()
+        resp = table.delete_item(
+            Key={"device": device},
+            ConditionExpression="attribute_exists(device)",
+            ReturnValues="ALL_OLD",
+        )
+        attrs = resp.get("Attributes", {}) or {}
+        return {
+            "device": attrs.get("device", device),
+            "patient": attrs.get("patient"),
+            "updatedAt": attrs.get("updatedAt"),
+            "deleted": True,
+        }
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            raise HTTPException(status_code=404, detail="Device not found")
+        raise HTTPException(status_code=500, detail=str(e))
+    except BotoCoreError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/devices/unregistered", response_model=List[str])
 def get_unregistered_devices():
     """Return devices present in S3 filenames but missing in DynamoDB mapping."""
