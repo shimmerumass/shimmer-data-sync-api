@@ -109,7 +109,7 @@ def list_files_metadata():
         keys = [obj["Key"] for obj in contents]
 
         # Load device→patient mapping from DynamoDB
-        mapping: Dict[str, str] = {}
+        mapping: Dict[str, Optional[str]] = {}
         table = _get_ddb_table()
         scan_kwargs: Dict = {"ProjectionExpression": "device, patient"}
         while True:
@@ -118,7 +118,7 @@ def list_files_metadata():
                 dev = it.get("device")
                 pat = it.get("patient")
                 if dev:
-                    # Coerce empty/None to None so API returns null
+                    # Coerce empty/None to None in mapping
                     mapping[dev] = pat if (pat is not None and pat != "") else None
             if "LastEvaluatedKey" in dresp:
                 scan_kwargs["ExclusiveStartKey"] = dresp["LastEvaluatedKey"]
@@ -129,7 +129,8 @@ def list_files_metadata():
         for k in keys:
             fi = parse_file_name(k)
             pat = mapping.get(fi.device)
-            fi.patient = pat if (pat is not None and pat != "") else None
+            # Set to "none" when missing/empty in the DB mapping
+            fi.patient = pat if (pat is not None and pat != "") else "none"
             items.append(fi)
         return items
     except (BotoCoreError, ClientError) as e:
