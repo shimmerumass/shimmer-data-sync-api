@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body, Path
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import io
@@ -42,6 +42,11 @@ class FileItem(BaseModel):
     part: Optional[str] = None
     ext: str
     patient: Optional[str] = None
+
+class DevicePatientRecord(BaseModel):
+    device: str
+    patient: Optional[str] = None
+    updatedAt: Optional[str] = None
 
 def parse_file_name(key: str) -> FileItem:
     name = os.path.basename(key)
@@ -223,45 +228,50 @@ def _get_ddb_table():
     return ddb.Table(table_name)
 
 # ---------------------- DynamoDB mapping endpoints ----------------------
-@app.get("/ddb/device-patient-map", response_model=Dict[str, str])
+@app.get("/ddb/device-patient-map", response_model=List[DevicePatientRecord])
 def ddb_get_device_patient_map():
-    """Return full device→patient map from DynamoDB (PK: device)."""
+    """Return full list of records with device, patient, updatedAt from DynamoDB."""
     try:
         table = _get_ddb_table()
-        items: Dict[str, str] = {}
-        scan_kwargs = {}
+        records: List[DevicePatientRecord] = []
+        scan_kwargs: Dict = {"ProjectionExpression": "device, patient, updatedAt"}
         while True:
             resp = table.scan(**scan_kwargs)
             for it in resp.get("Items", []):
-                device = it.get("device")
-                patient = it.get("patient")
-                if device and patient is not None:
-                    items[device] = patient
+                records.append(DevicePatientRecord(
+                    device=it.get("device", ""),
+                    patient=it.get("patient"),
+                    updatedAt=it.get("updatedAt")
+                ))
             if "LastEvaluatedKey" in resp:
                 scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
             else:
                 break
-        return items
+        return records
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/ddb/device-patient-map", response_model=Dict[str, str])
-def ddb_put_device_patient_map(mapping: Dict[str, str] = Body(...)):
-    """Replace the map by writing items: { device, patient }. Also sets updatedAt (UTC)."""
+@app.get("/ddb/device-patient-map/details", response_model=List[DevicePatientRecord])
+def ddb_get_device_patient_map_details():
+    """Return full records with device, patient, updatedAt from DynamoDB."""
     try:
         table = _get_ddb_table()
-        devices = list(mapping.keys())
-        for i in range(0, len(devices), 25):
-            chunk = devices[i:i+25]
-            with table.batch_writer() as batch:
-                for d in chunk:
-                    batch.put_item(Item={
-                        "device": d,
-                        "patient": mapping[d],
-                        "updatedAt": datetime.now(timezone.utc).isoformat()
-                    })
-        return mapping
+        records: List[DevicePatientRecord] = []
+        scan_kwargs: Dict = {"ProjectionExpression": "device, patient, updatedAt"}
+        while True:
+            resp = table.scan(**scan_kwargs)
+            for it in resp.get("Items", []):
+                records.append(DevicePatientRecord(
+                    device=it.get("device", ""),
+                    patient=it.get("patient"),
+                    updatedAt=it.get("updatedAt")
+                ))
+            if "LastEvaluatedKey" in resp:
+                scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+            else:
+                break
+        return records
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -274,7 +284,30 @@ def ddb_get_device_mapping(device: str):
         item = resp.get("Item")
         if not item:
             raise HTTPException(status_code=404, detail="Device not found")
-        return {"device": device, "patient": item.get("patient")}
+        return {"device": device, "patient": item.get("patient"), "updatedAt": item.get("updatedAt")}
+    except (BotoCoreError, ClientError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/ddb/device-patient-map", response_model=List[DevicePatientRecord])
+def ddb_put_device_patient_map(mapping: Dict[str, str] = Body(...)):
+    """Replace the map by writing items and return full records (device, patient, updatedAt)."""
+    try:
+        table = _get_ddb_table()
+        written: List[DevicePatientRecord] = []
+        devices = list(mapping.keys())
+        for i in range(0, len(devices), 25):
+            chunk = devices[i:i+25]
+            with table.batch_writer() as batch:
+                for d in chunk:
+                    ts = datetime.now(timezone.utc).isoformat()
+                    batch.put_item(Item={
+                        "device": d,
+                        "patient": mapping[d],
+                        "updatedAt": ts,
+                    })
+                    written.append(DevicePatientRecord(device=d, patient=mapping[d], updatedAt=ts))
+        return written
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -286,12 +319,13 @@ def ddb_put_device_mapping(device: str, payload: Dict[str, str] = Body(...)):
         raise HTTPException(status_code=400, detail="'patient' is required")
     try:
         table = _get_ddb_table()
+        ts = datetime.now(timezone.utc).isoformat()
         table.put_item(Item={
             "device": device,
             "patient": patient,
-            "updatedAt": datetime.now(timezone.utc).isoformat()
+            "updatedAt": ts,
         })
-        return {"device": device, "patient": patient}
+        return {"device": device, "patient": patient, "updatedAt": ts}
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -340,6 +374,27 @@ def get_unregistered_devices():
 
         missing = sorted(list(devices_in_s3 - registered))
         return missing
+    except (BotoCoreError, ClientError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/patients", response_model=List[str])
+def list_unique_patients():
+    """Return a sorted unique list of patient names from DynamoDB (exclude empty/null)."""
+    try:
+        table = _get_ddb_table()
+        patients = set()
+        scan_kwargs: Dict = {"ProjectionExpression": "patient"}
+        while True:
+            resp = table.scan(**scan_kwargs)
+            for it in resp.get("Items", []):
+                p = it.get("patient")
+                if p is not None and str(p).strip() != "":
+                    patients.add(str(p))
+            if "LastEvaluatedKey" in resp:
+                scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+            else:
+                break
+        return sorted(patients)
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
