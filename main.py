@@ -7,6 +7,7 @@ import zipfile
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from typing import List, Optional
+from typing import Dict
 from dotenv import load_dotenv
 from mangum import Mangum
 from pydantic import BaseModel
@@ -183,6 +184,81 @@ def download_all_url():
             ExpiresIn=3600  # 1 hour
         )
         return {"download_url": url}
+    except (BotoCoreError, ClientError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------- DynamoDB helpers ----------------------
+
+def _get_ddb_table():
+    table_name = os.getenv("DDB_TABLE")
+    if not table_name:
+        raise HTTPException(status_code=500, detail="DDB_TABLE env not set")
+    ddb = boto3.resource("dynamodb")
+    return ddb.Table(table_name)
+
+# ---------------------- DynamoDB mapping endpoints ----------------------
+@app.get("/ddb/device-patient-map", response_model=Dict[str, str])
+def ddb_get_device_patient_map():
+    """Return full device→patient map from DynamoDB (PK: device)."""
+    try:
+        table = _get_ddb_table()
+        items: Dict[str, str] = {}
+        scan_kwargs = {}
+        while True:
+            resp = table.scan(**scan_kwargs)
+            for it in resp.get("Items", []):
+                device = it.get("device")
+                patient = it.get("patient")
+                if device and patient is not None:
+                    items[device] = patient
+            if "LastEvaluatedKey" in resp:
+                scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+            else:
+                break
+        return items
+    except (BotoCoreError, ClientError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/ddb/device-patient-map", response_model=Dict[str, str])
+def ddb_put_device_patient_map(mapping: Dict[str, str] = Body(...)):
+    """Replace the map by writing items: { device, patient }."""
+    try:
+        table = _get_ddb_table()
+        # Batch write up to 25 at a time
+        devices = list(mapping.keys())
+        for i in range(0, len(devices), 25):
+            chunk = devices[i:i+25]
+            with table.batch_writer() as batch:
+                for d in chunk:
+                    batch.put_item(Item={"device": d, "patient": mapping[d]})
+        return mapping
+    except (BotoCoreError, ClientError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ddb/device-patient-map/{device}")
+def ddb_get_device_mapping(device: str):
+    try:
+        table = _get_ddb_table()
+        resp = table.get_item(Key={"device": device})
+        item = resp.get("Item")
+        if not item:
+            raise HTTPException(status_code=404, detail="Device not found")
+        return {"device": device, "patient": item.get("patient")}
+    except (BotoCoreError, ClientError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/ddb/device-patient-map/{device}")
+def ddb_put_device_mapping(device: str, payload: Dict[str, str] = Body(...)):
+    patient = payload.get("patient")
+    if not patient:
+        raise HTTPException(status_code=400, detail="'patient' is required")
+    try:
+        table = _get_ddb_table()
+        table.put_item(Item={"device": device, "patient": patient})
+        return {"device": device, "patient": patient}
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
