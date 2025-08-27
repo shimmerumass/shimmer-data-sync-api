@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from mangum import Mangum
 from pydantic import BaseModel
 from datetime import datetime, timezone
+from fastapi import Request
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -230,13 +231,21 @@ def download_file(filename: str):
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+
 @app.get("/generate-upload-url/")
-def generate_upload_url(filename: str = Query(...)):
+async def generate_upload_url(filename: str = Query(...), request: Request = None):
+    """
+    Optionally accepts 'tags' as a query parameter (tags as key1=value1&key2=value2).
+    """
     try:
+        tags = request.query_params.get("tags") if request else None
+        params = {"Bucket": S3_BUCKET, "Key": filename}
+        if tags:
+            params["Tagging"] = tags
         url = s3_client.generate_presigned_url(
             ClientMethod="put_object",
-            Params={"Bucket": S3_BUCKET, "Key": filename},
-            ExpiresIn=3600  # URL valid for 1 hour
+            Params=params,
+            ExpiresIn=3600
         )
         return {"upload_url": url}
     except (BotoCoreError, ClientError) as e:
