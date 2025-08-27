@@ -188,29 +188,87 @@ def get_files_metadata() -> Dict[str, Any]:
                 break
 
         from collections import defaultdict
-        # Group by (date, device)
-        grouped = defaultdict(lambda: {"files": [], "patient": None})
+        # Group by (device, date)
+        def parse_custom_filename(fname):
+            parts = fname.split("__")
+            device = parts[0] if len(parts) > 0 else "none"
+            timestamp = parts[1] if len(parts) > 1 else "none"
+            experiment_name = parts[2] if len(parts) > 2 else "none"
+            shimmer_field = parts[3] if len(parts) > 3 else "none"
+            filename = parts[5] if len(parts) > 5 else "none"
+            # Split shimmer_field into shimmer_device and shimmer_day
+            shimmer_device = shimmer_field
+            shimmer_day = "none"
+            if shimmer_field != "none" and "-" in shimmer_field:
+                shimmer_device, shimmer_day = shimmer_field.rsplit("-", 1)
+            # ext and part from filename
+            ext = ""
+            part = None
+            if filename and "." in filename:
+                ext = filename.split(".")[-1]
+                part = filename.split(".")[0]
+            elif filename:
+                part = filename
+            # Parse date and time from timestamp (format: YYYYMMDD_HHMMSS)
+            date = "none"
+            time = "none"
+            if timestamp and "_" in timestamp:
+                ymd, hms = timestamp.split("_", 1)
+                if len(ymd) == 8 and len(hms) == 6:
+                    date = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+                    time = f"{hms[:2]}:{hms[2:4]}:{hms[4:6]}"
+            return {
+                "device": device,
+                "timestamp": timestamp,
+                "time": time,
+                "experiment_name": experiment_name,
+                "shimmer_device": shimmer_device,
+                "shimmer_day": shimmer_day,
+                "date": date,
+                "filename": filename,
+                "ext": ext,
+                "part": part
+            }
+
+        grouped = defaultdict(lambda: {"files": [], "patient": None, "shimmer_devices": set()})
         for k in keys:
-            fi = parse_file_name(k)
-            pat = mapping.get(fi.device)
-            if fi.date and fi.device:
-                key = (fi.date, fi.device)
-                file_record = {
-                    "time": fi.time,
-                    "ext": fi.ext,
-                    "part": fi.part,
-                    "fullname": k
-                }
-                grouped[key]["files"].append(file_record)
-                grouped[key]["patient"] = pat if (pat is not None and pat != "") else "none"
+            meta = parse_custom_filename(os.path.basename(k))
+            device = meta["device"]
+            date = meta["date"]
+            experiment_name = meta["experiment_name"]
+            shimmer_device = meta["shimmer_device"]
+            timestamp = meta["timestamp"]
+            pat = mapping.get(device)
+            file_record = {
+                "fullname": k,
+                "timestamp": timestamp,
+                "time": meta["time"],
+                "filename": meta["filename"],
+                "shimmer_device": meta["shimmer_device"],
+                "shimmer_day": meta["shimmer_day"],
+                "ext": meta["ext"],
+                "part": meta["part"],
+                "experiment_name": experiment_name
+            }
+            grouped[(device, date, pat)]["files"].append(file_record)
+            grouped[(device, date, pat)]["patient"] = pat if (pat is not None and pat != "") else "none"
+            grouped[(device, date, pat)]["experiment_name"] = experiment_name
+            if shimmer_device != "none":
+                grouped[(device, date, pat)]["shimmer_devices"].add(shimmer_device)
         # Convert to desired output format
         result = []
-        for (date, device), value in grouped.items():
+        for (device, date, patient), value in grouped.items():
+            shimmers = list(value["shimmer_devices"])
+            shimmer1 = shimmers[0] if len(shimmers) > 0 else "none"
+            shimmer2 = shimmers[1] if len(shimmers) > 1 else "none"
             result.append({
                 "device": device,
                 "date": date,
+                "experiment_name": value["experiment_name"],
+                "shimmer1": shimmer1,
+                "shimmer2": shimmer2,
                 "files": value["files"],
-                "patient": value["patient"]
+                "patient": patient
             })
         return {"data": result, "error": None}
     except (BotoCoreError, ClientError, Exception) as e:
