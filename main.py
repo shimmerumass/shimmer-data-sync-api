@@ -1,3 +1,4 @@
+
 import os
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body, Path
 from fastapi.responses import StreamingResponse, FileResponse
@@ -13,6 +14,7 @@ from mangum import Mangum
 from pydantic import BaseModel
 from datetime import datetime, timezone
 from fastapi import Request
+import struct
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -611,3 +613,89 @@ def download_zip_by_user_date(files: List[Dict] = Body(...)):
         return {"download_url": url}
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# Endpoint: decode shimmer file header and sensor info
+@app.get("/file/decode/")
+def decode_shimmer_file(filename: str = Query(...)):
+    """
+    Decodes the header and sensor info from a shimmer .txt file stored in S3.
+    Returns parsed header and sensor info as JSON.
+    """
+    try:
+        s3_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=filename)
+        file_bytes = s3_obj["Body"].read()
+        HEADER_LENGTH = 256
+        if len(file_bytes) < HEADER_LENGTH:
+            raise HTTPException(status_code=400, detail="File too short for header.")
+        header = file_bytes[:HEADER_LENGTH]
+        def get_byte(offset):
+            return header[offset]
+        def get_bytes(offset, length):
+            return header[offset:offset+length]
+        # Parse MAC address
+        SDH_MAC_ADDR_C_OFFSET = 24
+        MAC_ADDRESS_LENGTH = 6
+        mac_bytes = get_bytes(SDH_MAC_ADDR_C_OFFSET, MAC_ADDRESS_LENGTH)
+        mac_address = ':'.join(f'{b:02X}' for b in mac_bytes)
+        # Parse sample rate
+        SDH_SAMPLE_RATE_0 = 0
+        SDH_SAMPLE_RATE_1 = 1
+        sample_rate_ticks = struct.unpack('<H', get_bytes(SDH_SAMPLE_RATE_0, 2))[0]
+        sample_rate = 32768 / sample_rate_ticks if sample_rate_ticks else None
+        # Parse sensors0, sensors1, sensors2
+        SDH_SENSORS0 = 3
+        SDH_SENSORS1 = 4
+        SDH_SENSORS2 = 5
+        sensors0 = get_byte(SDH_SENSORS0)
+        sensors1 = get_byte(SDH_SENSORS1)
+        sensors2 = get_byte(SDH_SENSORS2)
+        # Parse configByte3 (GSR range)
+        SDH_CONFIG_SETUP_BYTE3 = 11
+        configByte3 = get_byte(SDH_CONFIG_SETUP_BYTE3)
+        # Parse trial config
+        SDH_TRIAL_CONFIG0 = 16
+        SDH_TRIAL_CONFIG1 = 17
+        trialConfig0 = get_byte(SDH_TRIAL_CONFIG0)
+        trialConfig1 = get_byte(SDH_TRIAL_CONFIG1)
+        # Parse shimmer version
+        SDH_SHIMMERVERSION_BYTE_0 = 30
+        SDH_SHIMMERVERSION_BYTE_1 = 31
+        shimmer_version = struct.unpack('>H', get_bytes(SDH_SHIMMERVERSION_BYTE_0, 2))[0]
+        # Parse experiment ID
+        SDH_MYTRIAL_ID = 32
+        experiment_id = get_byte(SDH_MYTRIAL_ID)
+        # Parse nShimmer
+        SDH_NSHIMMER = 33
+        n_shimmer = get_byte(SDH_NSHIMMER)
+        # Parse FW version
+        SDH_FW_VERSION_TYPE_0 = 34
+        SDH_FW_VERSION_TYPE_1 = 35
+        SDH_FW_VERSION_MAJOR_0 = 36
+        SDH_FW_VERSION_MAJOR_1 = 37
+        SDH_FW_VERSION_MINOR = 38
+        SDH_FW_VERSION_INTERNAL = 39
+        fw_type = struct.unpack('>H', get_bytes(SDH_FW_VERSION_TYPE_0, 2))[0]
+        fw_major = struct.unpack('>H', get_bytes(SDH_FW_VERSION_MAJOR_0, 2))[0]
+        fw_minor = get_byte(SDH_FW_VERSION_MINOR)
+        fw_internal = get_byte(SDH_FW_VERSION_INTERNAL)
+        # Return parsed info
+        return {
+            "mac_address": mac_address,
+            "sample_rate": sample_rate,
+            "sensors0": sensors0,
+            "sensors1": sensors1,
+            "sensors2": sensors2,
+            "configByte3": configByte3,
+            "trialConfig0": trialConfig0,
+            "trialConfig1": trialConfig1,
+            "shimmer_version": shimmer_version,
+            "experiment_id": experiment_id,
+            "n_shimmer": n_shimmer,
+            "fw_type": fw_type,
+            "fw_major": fw_major,
+            "fw_minor": fw_minor,
+            "fw_internal": fw_internal
+        }
+    except (BotoCoreError, ClientError, Exception) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
