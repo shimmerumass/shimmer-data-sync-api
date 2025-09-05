@@ -1,4 +1,3 @@
-
 import os
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Body, Path
 from fastapi.responses import StreamingResponse, FileResponse
@@ -698,4 +697,134 @@ def decode_shimmer_file(filename: str = Query(...)):
         }
     except (BotoCoreError, ClientError, Exception) as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/file/parse-name/")
+def parse_filename(filename: str = Query(...)):
+    """
+    Parses a filename and returns its components as JSON.
+    Handles the custom format: device__timestamp__experiment__shimmer_field__filename
+    """
+    try:
+        def parse_custom_filename(fname):
+            parts = fname.split("__")
+            device = parts[0] if len(parts) > 0 else "none"
+            timestamp = parts[1] if len(parts) > 1 else "none"
+            experiment_name = parts[2] if len(parts) > 2 else "none"
+            shimmer_field = parts[3] if len(parts) > 3 else "none"
+            filename = parts[5] if len(parts) > 5 else "none"
+            
+            # Split shimmer_field into shimmer_device and shimmer_day
+            shimmer_device = shimmer_field
+            shimmer_day = "none"
+            if shimmer_field != "none" and "-" in shimmer_field:
+                shimmer_device, shimmer_day = shimmer_field.rsplit("-", 1)
+            
+            # ext and part from filename
+            ext = ""
+            part = None
+            if filename and "." in filename:
+                ext = filename.split(".")[-1]
+                part = filename.split(".")[0]
+            elif filename:
+                part = filename
+            
+            # Parse date and time from timestamp (format: YYYYMMDD_HHMMSS)
+            date = "none"
+            time = "none"
+            if timestamp and "_" in timestamp:
+                ymd, hms = timestamp.split("_", 1)
+                if len(ymd) == 8 and len(hms) == 6:
+                    date = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+                    time = f"{hms[:2]}:{hms[2:4]}:{hms[4:6]}"
+            
+            return {
+                "original_filename": fname,
+                "device": device,
+                "timestamp": timestamp,
+                "date": date,
+                "time": time,
+                "experiment_name": experiment_name,
+                "shimmer_device": shimmer_device,
+                "shimmer_day": shimmer_day,
+                "filename": filename,
+                "ext": ext,
+                "part": part
+            }
+        
+        parsed = parse_custom_filename(filename)
+        return parsed
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/files/deconstructed/")
+def get_deconstructed_files():
+    """
+    Returns a list of all files in S3 with their parsed components as individual JSON records.
+    Each file is returned as a separate record with all its parsed fields.
+    Skips .zip files.
+    """
+    try:
+        response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
+        contents = response.get("Contents", [])
+        
+        def parse_custom_filename(fname):
+            parts = fname.split("__")
+            device = parts[0] if len(parts) > 0 else "none"
+            timestamp = parts[1] if len(parts) > 1 else "none"
+            experiment_name = parts[2] if len(parts) > 2 else "none"
+            shimmer_field = parts[3] if len(parts) > 3 else "none"
+            filename = parts[5] if len(parts) > 5 else "none"
+            
+            # Split shimmer_field into shimmer_device and shimmer_day
+            shimmer_device = shimmer_field
+            shimmer_day = "none"
+            if shimmer_field != "none" and "-" in shimmer_field:
+                shimmer_device, shimmer_day = shimmer_field.rsplit("-", 1)
+            
+            # ext and part from filename
+            ext = ""
+            part = None
+            if filename and "." in filename:
+                ext = filename.split(".")[-1]
+                part = filename.split(".")[0]
+            elif filename:
+                part = filename
+            
+            # Parse date and time from timestamp (format: YYYYMMDD_HHMMSS)
+            date = "none"
+            time = "none"
+            if timestamp and "_" in timestamp:
+                ymd, hms = timestamp.split("_", 1)
+                if len(ymd) == 8 and len(hms) == 6:
+                    date = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+                    time = f"{hms[:2]}:{hms[2:4]}:{hms[4:6]}"
+            
+            return {
+                "fullname": fname,
+                "device": device,
+                "timestamp": timestamp,
+                "date": date,
+                "time": time,
+                "experiment_name": experiment_name,
+                "shimmer_device": shimmer_device,
+                "shimmer_day": shimmer_day,
+                "filename": filename,
+                "ext": ext,
+                "part": part
+            }
+        
+        result = []
+        for obj in contents:
+            key = obj["Key"]
+            # Skip .zip files
+            if key.lower().endswith('.zip'):
+                continue
+            parsed = parse_custom_filename(key)
+            result.append(parsed)
+        
+        return {"data": result, "error": None}
+    
+    except (BotoCoreError, ClientError, Exception) as e:
+        return {"data": [], "error": str(e)}
 
