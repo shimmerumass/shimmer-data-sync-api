@@ -109,6 +109,8 @@ def download_zip_by_day(date: str = Body(..., embed=True)):
 class DevicePatientRecord(BaseModel):
     device: str
     patient: Optional[str] = None
+    shimmer1: Optional[str] = None
+    shimmer2: Optional[str] = None
     updatedAt: Optional[str] = None
 
 def parse_file_name(key: str) -> FileItem:
@@ -382,13 +384,15 @@ def ddb_get_device_patient_map():
     try:
         table = _get_ddb_table()
         records: List[DevicePatientRecord] = []
-        scan_kwargs: Dict = {"ProjectionExpression": "device, patient, updatedAt"}
+        scan_kwargs: Dict = {"ProjectionExpression": "device, patient, shimmer1, shimmer2, updatedAt"}
         while True:
             resp = table.scan(**scan_kwargs)
             for it in resp.get("Items", []):
                 records.append(DevicePatientRecord(
                     device=it.get("device", ""),
                     patient=it.get("patient"),
+                    shimmer1=it.get("shimmer1"),
+                    shimmer2=it.get("shimmer2"),
                     updatedAt=it.get("updatedAt")
                 ))
             if "LastEvaluatedKey" in resp:
@@ -406,13 +410,15 @@ def ddb_get_device_patient_map_details():
     try:
         table = _get_ddb_table()
         records: List[DevicePatientRecord] = []
-        scan_kwargs: Dict = {"ProjectionExpression": "device, patient, updatedAt"}
+        scan_kwargs: Dict = {"ProjectionExpression": "device, patient, shimmer1, shimmer2, updatedAt"}
         while True:
             resp = table.scan(**scan_kwargs)
             for it in resp.get("Items", []):
                 records.append(DevicePatientRecord(
                     device=it.get("device", ""),
                     patient=it.get("patient"),
+                    shimmer1=it.get("shimmer1"),
+                    shimmer2=it.get("shimmer2"),
                     updatedAt=it.get("updatedAt")
                 ))
             if "LastEvaluatedKey" in resp:
@@ -432,7 +438,13 @@ def ddb_get_device_mapping(device: str):
         item = resp.get("Item")
         if not item:
             raise HTTPException(status_code=404, detail="Device not found")
-        return {"device": device, "patient": item.get("patient"), "updatedAt": item.get("updatedAt")}
+        return {
+            "device": device,
+            "patient": item.get("patient"),
+            "shimmer1": item.get("shimmer1"),
+            "shimmer2": item.get("shimmer2"),
+            "updatedAt": item.get("updatedAt")
+        }
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -449,12 +461,17 @@ def ddb_put_device_patient_map(mapping: Dict[str, str] = Body(...)):
             with table.batch_writer() as batch:
                 for d in chunk:
                     ts = datetime.now(timezone.utc).isoformat()
+                    patient = mapping[d].get("patient") if isinstance(mapping[d], dict) else mapping[d]
+                    shimmer1 = mapping[d].get("shimmer1") if isinstance(mapping[d], dict) else None
+                    shimmer2 = mapping[d].get("shimmer2") if isinstance(mapping[d], dict) else None
                     batch.put_item(Item={
                         "device": d,
-                        "patient": mapping[d],
+                        "patient": patient,
+                        "shimmer1": shimmer1,
+                        "shimmer2": shimmer2,
                         "updatedAt": ts,
                     })
-                    written.append(DevicePatientRecord(device=d, patient=mapping[d], updatedAt=ts))
+                    written.append(DevicePatientRecord(device=d, patient=patient, shimmer1=shimmer1, shimmer2=shimmer2, updatedAt=ts))
         return written
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -463,6 +480,8 @@ def ddb_put_device_patient_map(mapping: Dict[str, str] = Body(...)):
 @app.put("/ddb/device-patient-map/{device}")
 def ddb_put_device_mapping(device: str, payload: Dict[str, str] = Body(...)):
     patient = payload.get("patient")
+    shimmer1 = payload.get("shimmer1")
+    shimmer2 = payload.get("shimmer2")
     if not patient:
         raise HTTPException(status_code=400, detail="'patient' is required")
     try:
@@ -471,9 +490,17 @@ def ddb_put_device_mapping(device: str, payload: Dict[str, str] = Body(...)):
         table.put_item(Item={
             "device": device,
             "patient": patient,
+            "shimmer1": shimmer1,
+            "shimmer2": shimmer2,
             "updatedAt": ts,
         })
-        return {"device": device, "patient": patient, "updatedAt": ts}
+        return {
+            "device": device,
+            "patient": patient,
+            "shimmer1": shimmer1,
+            "shimmer2": shimmer2,
+            "updatedAt": ts
+        }
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -827,4 +854,187 @@ def get_deconstructed_files():
     
     except (BotoCoreError, ClientError, Exception) as e:
         return {"data": [], "error": str(e)}
+
+# ...existing code...
+
+@app.get("/files/combined-meta/")
+def get_combined_meta():
+    """
+    Returns combined metadata and decoded header info for all files in S3,
+    grouped by device, date, and experiment_name, with decoded info for both shimmers.
+    Skips .zip files.
+    """
+    try:
+        response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
+        contents = response.get("Contents", [])
+
+        # Helper to parse filename
+        def parse_custom_filename(fname):
+            parts = fname.split("__")
+            device = parts[0] if len(parts) > 0 else "none"
+            timestamp = parts[1] if len(parts) > 1 else "none"
+            experiment_name = parts[2] if len(parts) > 2 else "none"
+            shimmer_field = parts[3] if len(parts) > 3 else "none"
+            filename = parts[5] if len(parts) > 5 else "none"
+            shimmer_device = shimmer_field
+            shimmer_day = "none"
+            if shimmer_field != "none" and "-" in shimmer_field:
+                shimmer_device, shimmer_day = shimmer_field.rsplit("-", 1)
+            ext = ""
+            part = None
+            if filename and "." in filename:
+                ext = filename.split(".")[-1]
+                part = filename.split(".")[0]
+            elif filename:
+                part = filename
+            date = "none"
+            time = "none"
+            if timestamp and "_" in timestamp:
+                ymd, hms = timestamp.split("_", 1)
+                if len(ymd) == 8 and len(hms) == 6:
+                    date = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+                    time = f"{hms[:2]}:{hms[2:4]}:{hms[4:6]}"
+            return {
+                "fullname": fname,
+                "device": device,
+                "timestamp": timestamp,
+                "date": date,
+                "time": time,
+                "experiment_name": experiment_name,
+                "shimmer_device": shimmer_device,
+                "shimmer_day": shimmer_day,
+                "filename": filename,
+                "ext": ext,
+                "part": part
+            }
+
+        # Helper to decode header
+        def decode_shimmer_header(file_bytes):
+            HEADER_LENGTH = 256
+            if len(file_bytes) < HEADER_LENGTH:
+                return {}
+            header = file_bytes[:HEADER_LENGTH]
+            def get_byte(offset):
+                return header[offset]
+            def get_bytes(offset, length):
+                return header[offset:offset+length]
+            SDH_MAC_ADDR_C_OFFSET = 24
+            MAC_ADDRESS_LENGTH = 6
+            mac_bytes = get_bytes(SDH_MAC_ADDR_C_OFFSET, MAC_ADDRESS_LENGTH)
+            mac_address = ':'.join(f'{b:02X}' for b in mac_bytes)
+            SDH_SAMPLE_RATE_0 = 0
+            SDH_SAMPLE_RATE_1 = 1
+            sample_rate_ticks = struct.unpack('<H', get_bytes(SDH_SAMPLE_RATE_0, 2))[0]
+            sample_rate = 32768 / sample_rate_ticks if sample_rate_ticks else None
+            SDH_SENSORS0 = 3
+            SDH_SENSORS1 = 4
+            SDH_SENSORS2 = 5
+            sensors0 = get_byte(SDH_SENSORS0)
+            sensors1 = get_byte(SDH_SENSORS1)
+            sensors2 = get_byte(SDH_SENSORS2)
+            SDH_CONFIG_SETUP_BYTE3 = 11
+            configByte3 = get_byte(SDH_CONFIG_SETUP_BYTE3)
+            SDH_TRIAL_CONFIG0 = 16
+            SDH_TRIAL_CONFIG1 = 17
+            trialConfig0 = get_byte(SDH_TRIAL_CONFIG0)
+            trialConfig1 = get_byte(SDH_TRIAL_CONFIG1)
+            SDH_SHIMMERVERSION_BYTE_0 = 30
+            SDH_SHIMMERVERSION_BYTE_1 = 31
+            shimmer_version = struct.unpack('>H', get_bytes(SDH_SHIMMERVERSION_BYTE_0, 2))[0]
+            SDH_MYTRIAL_ID = 32
+            experiment_id = get_byte(SDH_MYTRIAL_ID)
+            SDH_NSHIMMER = 33
+            n_shimmer = get_byte(SDH_NSHIMMER)
+            SDH_FW_VERSION_TYPE_0 = 34
+            SDH_FW_VERSION_TYPE_1 = 35
+            SDH_FW_VERSION_MAJOR_0 = 36
+            SDH_FW_VERSION_MAJOR_1 = 37
+            SDH_FW_VERSION_MINOR = 38
+            SDH_FW_VERSION_INTERNAL = 39
+            fw_type = struct.unpack('>H', get_bytes(SDH_FW_VERSION_TYPE_0, 2))[0]
+            fw_major = struct.unpack('>H', get_bytes(SDH_FW_VERSION_MAJOR_0, 2))[0]
+            fw_minor = get_byte(SDH_FW_VERSION_MINOR)
+            fw_internal = get_byte(SDH_FW_VERSION_INTERNAL)
+            return {
+                "mac_address": mac_address,
+                "sample_rate": sample_rate,
+                "sensors0": sensors0,
+                "sensors1": sensors1,
+                "sensors2": sensors2,
+                "configByte3": configByte3,
+                "trialConfig0": trialConfig0,
+                "trialConfig1": trialConfig1,
+                "shimmer_version": shimmer_version,
+                "experiment_id": experiment_id,
+                "n_shimmer": n_shimmer,
+                "fw_type": fw_type,
+                "fw_major": fw_major,
+                "fw_minor": fw_minor,
+                "fw_internal": fw_internal
+            }
+
+        # Load device→patient mapping from DynamoDB
+        mapping = {}
+        try:
+            table = _get_ddb_table()
+            scan_kwargs = {"ProjectionExpression": "device, patient"}
+            while True:
+                dresp = table.scan(**scan_kwargs)
+                for it in dresp.get("Items", []):
+                    dev = it.get("device")
+                    pat = it.get("patient")
+                    if dev:
+                        mapping[dev] = pat if (pat is not None and pat != "") else None
+                if "LastEvaluatedKey" in dresp:
+                    scan_kwargs["ExclusiveStartKey"] = dresp["LastEvaluatedKey"]
+                else:
+                    break
+        except Exception:
+            mapping = {}
+
+        # Group files by device/patient and date
+        grouped = defaultdict(lambda: {"shimmer1_decoded": [], "shimmer2_decoded": []})
+        for obj in contents:
+            key = obj["Key"]
+            if key.lower().endswith('.zip'):
+                continue
+            meta = parse_custom_filename(os.path.basename(key))
+            device = meta["device"]
+            date = meta["date"]
+            patient = mapping.get(device) or "none"
+            try:
+                s3_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=key)
+                file_bytes = s3_obj["Body"].read()
+                decoded = decode_shimmer_header(file_bytes)
+            except Exception:
+                decoded = {}
+            record = {
+                "time": meta["time"],
+                "full_file_name": key,
+                **decoded
+            }
+            group_key = (device, patient, date)
+            shimmer_name = meta["shimmer_device"]
+            group = grouped[group_key]
+            if not group.get("device"):
+                group["device"] = device
+                group["date"] = date
+                group["patient"] = patient
+                group["shimmer1"] = shimmer_name
+            if shimmer_name == group.get("shimmer1"):
+                group["shimmer1_decoded"].append(record)
+            else:
+                if not group.get("shimmer2"):
+                    group["shimmer2"] = shimmer_name
+                group["shimmer2_decoded"].append(record)
+
+        # Format output
+        result = []
+        for group in grouped.values():
+            result.append(group)
+
+        return {"data": result, "error": None}
+    except (BotoCoreError, ClientError, Exception) as e:
+        return {"data": [], "error": str(e)}
+
 
