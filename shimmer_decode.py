@@ -1,5 +1,6 @@
 import struct
-import numpy as np
+import math
+from array import array
 
 
 def read_shimmer_dat_file_as_txt(file_bytes):
@@ -174,17 +175,10 @@ def read_shimmer_dat_file_as_txt(file_bytes):
             sensorData[name] = []
         return sensorData
 
-    # Preallocate arrays
-    sensorData['timestamps'] = np.zeros(numSamplesEstimate, dtype=np.uint32)
-    for name, typ in zip(channelNames, channelTypes):
-        if typ == 'int16':
-            sensorData[name] = np.zeros(numSamplesEstimate, dtype=np.int16)
-        elif typ == 'uint16':
-            sensorData[name] = np.zeros(numSamplesEstimate, dtype=np.uint16)
-        elif typ == 'int24':
-            sensorData[name] = np.zeros(numSamplesEstimate, dtype=np.int32)
-        else:
-            sensorData[name] = np.zeros(numSamplesEstimate, dtype=np.float64)
+    # Preallocate arrays using Python lists (no numpy)
+    sensorData['timestamps'] = [0] * numSamplesEstimate
+    for name in channelNames:
+        sensorData[name] = [0] * numSamplesEstimate
 
     # Read data packets
     sampleCount = 0
@@ -221,9 +215,9 @@ def read_shimmer_dat_file_as_txt(file_bytes):
 
     # Calculate accel_ln_abs and accel_var if Accel_LN_X/Y/Z are present
     if all(name in sensorData for name in ["Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z"]):
-        x = np.array(sensorData["Accel_LN_X"], dtype=np.float64)
-        y = np.array(sensorData["Accel_LN_Y"], dtype=np.float64)
-        z = np.array(sensorData["Accel_LN_Z"], dtype=np.float64)
+        x = array('d', [float(val) for val in sensorData["Accel_LN_X"]])
+        y = array('d', [float(val) for val in sensorData["Accel_LN_Y"]])
+        z = array('d', [float(val) for val in sensorData["Accel_LN_Z"]])
         lens = {"Accel_LN_X": len(x), "Accel_LN_Y": len(y), "Accel_LN_Z": len(z)}
         print(f"Accel_LN_X/Y/Z lengths: {lens}")
         if len(set(lens.values())) != 1:
@@ -231,25 +225,30 @@ def read_shimmer_dat_file_as_txt(file_bytes):
         else:
             print(f"Accel_LN_X/Y/Z lengths OK: {lens}")
         # Check for invalid values
-        invalid_mask = ~np.isfinite(x) | ~np.isfinite(y) | ~np.isfinite(z)
-        num_invalid = np.sum(invalid_mask)
+        num_invalid = sum(
+            not math.isfinite(x[i]) or not math.isfinite(y[i]) or not math.isfinite(z[i])
+            for i in range(len(x))
+        )
         if num_invalid > 0:
             print(f"WARNING: Found {num_invalid} invalid (NaN or inf) values in Accel_LN_X/Y/Z.")
         else:
             print("No invalid (NaN or inf) values in Accel_LN_X/Y/Z.")
-        sum_sq = x**2 + y**2 + z**2
-        num_negative = np.sum(sum_sq < 0)
+        # Calculate sum of squares and check for negatives
+        sum_sq = array('d', [x[i]**2 + y[i]**2 + z[i]**2 for i in range(len(x))])
+        num_negative = sum(val < 0 for val in sum_sq)
         if num_negative > 0:
             print(f"WARNING: {num_negative} negative values found in x**2 + y**2 + z**2 before sqrt.")
         else:
             print("No negative values in x**2 + y**2 + z**2 before sqrt.")
-        accel_ln_abs = np.sqrt(sum_sq)
-        accel_ln_abs_rounded = np.round(accel_ln_abs, 2)
-        sensorData["accel_ln_abs"] = accel_ln_abs_rounded.tolist()
-        if accel_ln_abs_rounded.size > 0:
-            min_val = np.min(accel_ln_abs_rounded)
-            max_val = np.max(accel_ln_abs_rounded)
+        # Calculate accel_ln_abs
+        accel_ln_abs = array('d', [math.sqrt(val) if val >= 0 else float('nan') for val in sum_sq])
+        # Round to 2 decimals
+        accel_ln_abs_rounded = [round(val, 2) for val in accel_ln_abs]
+        sensorData["accel_ln_abs"] = accel_ln_abs_rounded
+        if accel_ln_abs_rounded:
+            min_val = min(accel_ln_abs_rounded)
+            max_val = max(accel_ln_abs_rounded)
             print(f"accel_ln_abs_rounded min: {min_val}, max: {max_val}")
-            sensorData["accel_var"] = float(max_val - min_val)
+            sensorData["accel_var"] = float(round(max_val - min_val, 2))
     print(f"Successfully read {sampleCount} samples.")
     return sensorData

@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import Request
 import struct
+from shimmer_decode import read_shimmer_dat_file_as_txt
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -771,78 +772,9 @@ def decode_shimmer_file(filename: str = Query(...)):
     try:
         s3_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=filename)
         file_bytes = s3_obj["Body"].read()
-        HEADER_LENGTH = 256
-        if len(file_bytes) < HEADER_LENGTH:
-            raise HTTPException(status_code=400, detail="File too short for header.")
-        header = file_bytes[:HEADER_LENGTH]
-        def get_byte(offset):
-            return header[offset]
-        def get_bytes(offset, length):
-            return header[offset:offset+length]
-        # Parse MAC address
-        SDH_MAC_ADDR_C_OFFSET = 24
-        MAC_ADDRESS_LENGTH = 6
-        mac_bytes = get_bytes(SDH_MAC_ADDR_C_OFFSET, MAC_ADDRESS_LENGTH)
-        mac_address = ':'.join(f'{b:02X}' for b in mac_bytes)
-        # Parse sample rate
-        SDH_SAMPLE_RATE_0 = 0
-        SDH_SAMPLE_RATE_1 = 1
-        sample_rate_ticks = struct.unpack('<H', get_bytes(SDH_SAMPLE_RATE_0, 2))[0]
-        sample_rate = 32768 / sample_rate_ticks if sample_rate_ticks else None
-        # Parse sensors0, sensors1, sensors2
-        SDH_SENSORS0 = 3
-        SDH_SENSORS1 = 4
-        SDH_SENSORS2 = 5
-        sensors0 = get_byte(SDH_SENSORS0)
-        sensors1 = get_byte(SDH_SENSORS1)
-        sensors2 = get_byte(SDH_SENSORS2)
-        # Parse configByte3 (GSR range)
-        SDH_CONFIG_SETUP_BYTE3 = 11
-        configByte3 = get_byte(SDH_CONFIG_SETUP_BYTE3)
-        # Parse trial config
-        SDH_TRIAL_CONFIG0 = 16
-        SDH_TRIAL_CONFIG1 = 17
-        trialConfig0 = get_byte(SDH_TRIAL_CONFIG0)
-        trialConfig1 = get_byte(SDH_TRIAL_CONFIG1)
-        # Parse shimmer version
-        SDH_SHIMMERVERSION_BYTE_0 = 30
-        SDH_SHIMMERVERSION_BYTE_1 = 31
-        shimmer_version = struct.unpack('>H', get_bytes(SDH_SHIMMERVERSION_BYTE_0, 2))[0]
-        # Parse experiment ID
-        SDH_MYTRIAL_ID = 32
-        experiment_id = get_byte(SDH_MYTRIAL_ID)
-        # Parse nShimmer
-        SDH_NSHIMMER = 33
-        n_shimmer = get_byte(SDH_NSHIMMER)
-        # Parse FW version
-        SDH_FW_VERSION_TYPE_0 = 34
-        SDH_FW_VERSION_TYPE_1 = 35
-        SDH_FW_VERSION_MAJOR_0 = 36
-        SDH_FW_VERSION_MAJOR_1 = 37
-        SDH_FW_VERSION_MINOR = 38
-        SDH_FW_VERSION_INTERNAL = 39
-        fw_type = struct.unpack('>H', get_bytes(SDH_FW_VERSION_TYPE_0, 2))[0]
-        fw_major = struct.unpack('>H', get_bytes(SDH_FW_VERSION_MAJOR_0, 2))[0]
-        fw_minor = get_byte(SDH_FW_VERSION_MINOR)
-        fw_internal = get_byte(SDH_FW_VERSION_INTERNAL)
-        # Return parsed info
-        return {
-            "mac_address": mac_address,
-            "sample_rate": sample_rate,
-            "sensors0": sensors0,
-            "sensors1": sensors1,
-            "sensors2": sensors2,
-            "configByte3": configByte3,
-            "trialConfig0": trialConfig0,
-            "trialConfig1": trialConfig1,
-            "shimmer_version": shimmer_version,
-            "experiment_id": experiment_id,
-            "n_shimmer": n_shimmer,
-            "fw_type": fw_type,
-            "fw_major": fw_major,
-            "fw_minor": fw_minor,
-            "fw_internal": fw_internal
-        }
+        # Use shimmer_decode to decode full sensor data
+        decoded = read_shimmer_dat_file_as_txt(file_bytes)
+        return decoded
     except (BotoCoreError, ClientError, Exception) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1020,26 +952,13 @@ def get_combined_meta():
                     patient = resp.get("Item", {}).get("patient", "none")
                 except Exception:
                     patient = "none"
-            record = {
-                "time": item.get("time", "none"),
-                "full_file_name": item.get("full_file_name", item.get("filename", "none")),
-                # All decoded fields
-                "mac_address": item.get("mac_address"),
-                "sample_rate": item.get("sample_rate"),
-                "sensors0": item.get("sensors0"),
-                "sensors1": item.get("sensors1"),
-                "sensors2": item.get("sensors2"),
-                "configByte3": item.get("configByte3"),
-                "trialConfig0": item.get("trialConfig0"),
-                "trialConfig1": item.get("trialConfig1"),
-                "shimmer_version": item.get("shimmer_version"),
-                "experiment_id": item.get("experiment_id"),
-                "n_shimmer": item.get("n_shimmer"),
-                "fw_type": item.get("fw_type"),
-                "fw_major": item.get("fw_major"),
-                "fw_minor": item.get("fw_minor"),
-                "fw_internal": item.get("fw_internal"),
+            # Exclude EXCLUDE_KEYS from the output record
+            EXCLUDE_KEYS = {
+                "timestamp", "headerInfo", "headerBytes", "sampleRate", "channelNames", "packetLengthBytes",
+                "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14", "Gyro_X", "Gyro_Y", "Gyro_Z",
+                "Accel_WR_X", "Accel_WR_y", "Accel_WR_Z", "Mag_X", "Mag_y", "Mag_Z"
             }
+            record = {k: v for k, v in item.items() if k not in EXCLUDE_KEYS}
             group_key = (device, patient, date)
             group = grouped[group_key]
             if not group.get("device"):
@@ -1077,67 +996,6 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
         # Download file from S3
         s3_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=full_file_name)
         file_bytes = s3_obj["Body"].read()
-
-        # Decode header (reuse decode_shimmer_header from /upload/)
-        def decode_shimmer_header(file_bytes):
-            HEADER_LENGTH = 256
-            if len(file_bytes) < HEADER_LENGTH:
-                return {}
-            header = file_bytes[:HEADER_LENGTH]
-            def get_byte(offset):
-                return header[offset]
-            def get_bytes(offset, length):
-                return header[offset:offset+length]
-            SDH_MAC_ADDR_C_OFFSET = 24
-            MAC_ADDRESS_LENGTH = 6
-            mac_bytes = get_bytes(SDH_MAC_ADDR_C_OFFSET, MAC_ADDRESS_LENGTH)
-            mac_address = ':'.join(f'{b:02X}' for b in mac_bytes)
-            SDH_SAMPLE_RATE_0 = 0
-            sample_rate_ticks = struct.unpack('<H', get_bytes(SDH_SAMPLE_RATE_0, 2))[0]
-            sample_rate = 32768 / sample_rate_ticks if sample_rate_ticks else None
-            SDH_SENSORS0 = 3
-            SDH_SENSORS1 = 4
-            SDH_SENSORS2 = 5
-            sensors0 = get_byte(SDH_SENSORS0)
-            sensors1 = get_byte(SDH_SENSORS1)
-            sensors2 = get_byte(SDH_SENSORS2)
-            SDH_CONFIG_SETUP_BYTE3 = 11
-            configByte3 = get_byte(SDH_CONFIG_SETUP_BYTE3)
-            SDH_TRIAL_CONFIG0 = 16
-            SDH_TRIAL_CONFIG1 = 17
-            trialConfig0 = get_byte(SDH_TRIAL_CONFIG0)
-            trialConfig1 = get_byte(SDH_TRIAL_CONFIG1)
-            SDH_SHIMMERVERSION_BYTE_0 = 30
-            shimmer_version = struct.unpack('>H', get_bytes(SDH_SHIMMERVERSION_BYTE_0, 2))[0]
-            SDH_MYTRIAL_ID = 32
-            experiment_id = get_byte(SDH_MYTRIAL_ID)
-            SDH_NSHIMMER = 33
-            n_shimmer = get_byte(SDH_NSHIMMER)
-            SDH_FW_VERSION_TYPE_0 = 34
-            SDH_FW_VERSION_MAJOR_0 = 36
-            SDH_FW_VERSION_MINOR = 38
-            SDH_FW_VERSION_INTERNAL = 39
-            fw_type = struct.unpack('>H', get_bytes(SDH_FW_VERSION_TYPE_0, 2))[0]
-            fw_major = struct.unpack('>H', get_bytes(SDH_FW_VERSION_MAJOR_0, 2))[0]
-            fw_minor = get_byte(SDH_FW_VERSION_MINOR)
-            fw_internal = get_byte(SDH_FW_VERSION_INTERNAL)
-            return {
-                "mac_address": mac_address,
-                "sample_rate": sample_rate,
-                "sensors0": sensors0,
-                "sensors1": sensors1,
-                "sensors2": sensors2,
-                "configByte3": configByte3,
-                "trialConfig0": trialConfig0,
-                "trialConfig1": trialConfig1,
-                "shimmer_version": shimmer_version,
-                "experiment_id": experiment_id,
-                "n_shimmer": n_shimmer,
-                "fw_type": fw_type,
-                "fw_major": fw_major,
-                "fw_minor": fw_minor,
-                "fw_internal": fw_internal
-            }
 
         # Parse filename for metadata (reuse from /upload/)
         def parse_custom_filename(fname):
@@ -1180,8 +1038,38 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
             }
 
         meta = parse_custom_filename(full_file_name)
-        decoded = decode_shimmer_header(file_bytes)
-        # Convert all float values to Decimal for DynamoDB
+        # Patient mapping from device
+        patient = None
+        try:
+            mapping_table_name = os.getenv("DDB_TABLE")
+            if mapping_table_name and meta.get("device"):
+                ddb = boto3.resource("dynamodb")
+                mapping_table = ddb.Table(mapping_table_name)
+                resp = mapping_table.get_item(Key={"device": meta["device"]})
+                patient = resp.get("Item", {}).get("patient")
+        except Exception:
+            patient = None
+        if patient:
+            meta["patient"] = patient
+
+        # Use shimmer_decode for full sensor decode
+        decoded = read_shimmer_dat_file_as_txt(file_bytes)
+
+
+        # Filter out specified attributes and sensor channels before saving
+        EXCLUDE_KEYS = {
+            "timestamp", "headerInfo", "headerBytes", "sampleRate", "channelNames", "packetLengthBytes",
+            "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14", "Gyro_X", "Gyro_Y", "Gyro_Z",
+            "Accel_WR_X", "Accel_WR_y", "Accel_WR_Z", "Mag_X", "Mag_y", "Mag_Z"
+        }
+
+        def filter_dict(d):
+            if isinstance(d, dict):
+                return {k: filter_dict(v) for k, v in d.items() if k not in EXCLUDE_KEYS}
+            if isinstance(d, list):
+                return [filter_dict(v) for v in d]
+            return d
+
         def convert_floats(obj):
             if isinstance(obj, float):
                 return Decimal(str(obj))
@@ -1190,7 +1078,12 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
             if isinstance(obj, list):
                 return [convert_floats(v) for v in obj]
             return obj
-        item = convert_floats({**meta, **decoded, "updatedAt": datetime.now(timezone.utc).isoformat()})
+
+
+        # Merge meta and decoded, then exclude EXCLUDE_KEYS from the root
+        merged = {**meta, **decoded}
+        item_filtered = {k: v for k, v in merged.items() if k not in EXCLUDE_KEYS}
+        item = convert_floats(item_filtered)
 
         # Store in DynamoDB file table
         file_table_name = os.getenv("DDB_FILE_TABLE")
