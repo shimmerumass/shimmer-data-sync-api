@@ -107,7 +107,7 @@ This keeps DynamoDB items small (~2-5 KB) while preserving full data access via 
 ├── main.py                    # FastAPI application & endpoints
 ├── shimmer_decode.py          # Binary decoder (legacy format)
 ├── shimmerCalibrate.py        # Calibrated decoder with inertial cal
-├── lambda_package/            # AWS Lambda deployment package
+├── test/                      # scripts to test the decoder code
 └── README.md
 ```
 
