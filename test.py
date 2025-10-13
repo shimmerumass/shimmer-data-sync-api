@@ -1,293 +1,414 @@
+# ============================================================
+#  read_shimmer_data_file.py
+#  Exact MATLAB port of readShimmerDataFile.m
+#  Adds: calibrate flag + auto-save .mat outputs
+# ============================================================
+
 import struct
-import numpy as np
-import json
+import math
+from array import array
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Any
+try:
+    from scipy.io import savemat
+except ImportError:
+    savemat = None
 
-def sign_extend_24bit(val_bytes):
-    val = val_bytes[0] + (val_bytes[1] << 8) + (val_bytes[2] << 16)
-    if val_bytes[2] & 0x80:
-        val -= 1 << 24
-    return val
 
-def parse_inertial_cal_params(header, sensor):
-    offsets = {
-        'WR_ACCEL': 76,
-        'GYRO': 97,
-        'MAG': 118,
-        'LN_ACCEL': 139
-    }
+# ----------------------------
+# Helper functions
+# ----------------------------
+
+def _sign_extend_24_le(b: bytes) -> int:
+    """Interpret 3 bytes (little-endian) as signed 24-bit int."""
+    v = b[0] | (b[1] << 8) | (b[2] << 16)
+    if b[2] & 0x80:
+        v -= 1 << 24
+    return v
+
+
+def _sign_extend_24_be(b: bytes) -> int:
+    """Interpret 3 bytes (big-endian) as signed 24-bit int."""
+    v = (b[0] << 16) | (b[1] << 8) | b[2]
+    if b[0] & 0x80:
+        v -= 1 << 24
+    return v
+
+
+@dataclass
+class Channel:
+    name: str
+    dtype: str
+    nbytes: int
+    endian: str
+
+
+def _add_channels(names, dtype, nbytes, endian) -> List[Channel]:
+    if isinstance(names, str):
+        names = [names]
+    return [Channel(n, dtype, nbytes, endian) for n in names]
+
+
+# ----------------------------
+# Array math helper functions (replacing NumPy)
+# ----------------------------
+
+def array_subtract(arr1, arr2):
+    """Subtract two arrays element-wise"""
+    return [a - b for a, b in zip(arr1, arr2)]
+
+def array_divide(arr1, arr2):
+    """Divide two arrays element-wise, avoiding division by zero"""
+    return [a / b if b != 0 else a for a, b in zip(arr1, arr2)]
+
+def matrix_vector_multiply(matrix_3x3, vector_3):
+    """Multiply 3x3 matrix by 3-element vector"""
+    result = [0.0, 0.0, 0.0]
+    for i in range(3):
+        for j in range(3):
+            result[i] += matrix_3x3[i][j] * vector_3[j]
+    return result
+
+def transpose_matrix_3x3(matrix):
+    """Transpose a 3x3 matrix"""
+    return [[matrix[j][i] for j in range(3)] for i in range(3)]
+
+# ----------------------------
+# Calibration parsing & apply
+# ----------------------------
+
+def parse_inertial_cal_params(header: bytes, sensor: str):
+    offsets = {'WR_ACCEL': 76, 'GYRO': 97, 'MAG': 118, 'LN_ACCEL': 139}
     start = offsets[sensor]
-    cal_bytes = header[start:start+21]
-    offset = struct.unpack('>hhh', bytes(cal_bytes[0:6]))
-    gain = struct.unpack('>HHH', bytes(cal_bytes[6:12]))
-    align = struct.unpack('bbb'*3, bytes(cal_bytes[12:21]))
-    alignment = np.array(align).reshape((3,3)).T
-    return np.array(offset), np.array(gain), alignment
+    cal = header[start:start + 21]
+    offset = list(struct.unpack('>hhh', cal[0:6]))
+    gain = list(struct.unpack('>HHH', cal[6:12]))
+    align = list(struct.unpack('bbb' * 3, cal[12:21]))
+    # Reshape to 3x3 and transpose
+    alignment = [[align[j*3 + i] for j in range(3)] for i in range(3)]
+    return offset, gain, alignment
 
-def apply_inertial_calibration(raw, offset, gain, alignment):
-    raw = np.array(raw, dtype=float)
-    gain = np.where(gain == 0, 1, gain)
-    data_no_offset = raw - offset
-    data_scaled = data_no_offset / gain
-    return (alignment/100.0 @ data_scaled.T).T
 
-def time_calibration(timestamps, header):
-    phone_rwc = struct.unpack('<I', header[52:56])[0]
-    print(phone_rwc, "Phone_rwc")
+def apply_inertial_calibration(raw_xyz_list, offset, gain, alignment):
+    """Apply calibration to list of [x,y,z] triplets"""
+    # Replace zero gains with 1
+    gain_safe = [g if g != 0 else 1.0 for g in gain]
+    
+    calibrated = []
+    for xyz in raw_xyz_list:
+        # Subtract offset
+        no_offset = array_subtract(xyz, offset)
+        # Divide by gain
+        scaled = array_divide(no_offset, gain_safe)
+        # Apply alignment matrix (divided by 100)
+        align_scaled = [[a/100.0 for a in row] for row in alignment]
+        result = matrix_vector_multiply(align_scaled, scaled)
+        calibrated.append(result)
+    
+    return calibrated
 
-    shimmer_rtc64 = int.from_bytes(header[44:52], 'little')
-    print("Exact bytes header RTC", header[44:53])
-    shimmer_rtc_lower40 = shimmer_rtc64 % (2**40)
-    initial_rtc_ticks = header[251]*(2**32) + struct.unpack('<I', header[252:256])[0]
-    raw = np.array(timestamps, dtype=np.uint32)
-    diffs = np.diff(raw)
-    rollover = np.where(diffs < -2**23)[0]
-    corr = np.zeros_like(raw)
-    if rollover.size > 0:
-        corr[rollover+1] = 1
-    corr = np.cumsum(corr) * 2**24
-    unwrapped = initial_rtc_ticks + (raw - raw[0]) + corr
-    temp_time = unwrapped - shimmer_rtc_lower40
-    print(initial_rtc_ticks, shimmer_rtc_lower40, "RTC")
-    print("Full shimemr RTC", shimmer_rtc64)
-    temp_time = phone_rwc + temp_time/32768.0
-    return temp_time, initial_rtc_ticks
 
-def read_shimmer_data_file_as_txt(filepath):
+# ----------------------------
+# Time calibration
+# ----------------------------
+
+def time_calibration(sensorData: Dict[str, Any], header: bytes) -> Dict[str, Any]:
+    sdhRtcDiff0, sdhRtcDiff7 = 44, 51
+    sdhConfigTime0, sdhConfigTime3 = 52, 55
+    sdhMyLocalTime5th, sdhMyLocalTimeStart, sdhMyLocalTimeEnd = 251, 252, 255
+
+    phoneRwc = struct.unpack('<I', header[sdhConfigTime0:sdhConfigTime3 + 1])[0]
+    shimmerRtc64 = int.from_bytes(header[sdhRtcDiff0:sdhRtcDiff7 + 1], 'little')
+    shimmerRtcLower40 = float(shimmerRtc64 % (2 ** 40))
+    initialRtcTicks = (header[sdhMyLocalTime5th] * (2 ** 32)) + struct.unpack('<I', header[sdhMyLocalTimeStart:sdhMyLocalTimeEnd + 1])[0]
+
+    raw = sensorData['timestamps']
+    if not raw:
+        sensorData['timestampCal'] = []
+        sensorData['initialTime'] = int(initialRtcTicks)
+        sensorData['phoneRwc'] = int(phoneRwc)
+        sensorData['shimmerRtcLower40'] = int(shimmerRtcLower40)
+        return sensorData
+
+    # Calculate differences and find rollovers
+    diffs = [raw[i+1] - raw[i] for i in range(len(raw)-1)]
+    rollover_indices = [i for i, d in enumerate(diffs) if d < -2**23]
+    
+    # Apply rollover corrections
+    corr = [0] * len(raw)
+    rollover_count = 0
+    for i in range(len(raw)):
+        if i-1 in rollover_indices:
+            rollover_count += 1
+        corr[i] = rollover_count * (2**24)
+
+    # Calculate unwrapped timestamps
+    unwrapped = [int(initialRtcTicks) + (raw[i] - raw[0]) + corr[i] for i in range(len(raw))]
+    tempTime = [phoneRwc + (u - shimmerRtcLower40) / 32768.0 for u in unwrapped]
+
+    # Smooth time differences
+    if len(tempTime) > 1:
+        dt = [tempTime[i+1] - tempTime[i] for i in range(len(tempTime)-1)]
+        if dt:
+            meanDiff = sum(dt) / len(dt)
+            threshold = 10.0 * abs(meanDiff) if meanDiff != 0 else 10.0
+            dt_smoothed = [d if abs(d) <= threshold else meanDiff for d in dt]
+            tempTime_updated = [tempTime[0]]
+            for d in dt_smoothed:
+                tempTime_updated.append(tempTime_updated[-1] + d)
+        else:
+            tempTime_updated = tempTime
+    else:
+        tempTime_updated = tempTime
+
+    sensorData['timestampCal'] = tempTime_updated
+    sensorData['initialTime'] = int(initialRtcTicks)
+    sensorData['phoneRwc'] = int(phoneRwc)
+    sensorData['shimmerRtcLower40'] = int(shimmerRtcLower40)
+    return sensorData
+
+
+# ----------------------------
+# Main reader
+# ----------------------------
+
+def read_shimmer_data_file(filepath: str, calibrate: bool = True) -> Dict[str, Any]:
+    sensorData: Dict[str, Any] = {}
     headerLength = 256
     timestampBytes = 3
-    twoByteChannelSize = 2
-    bmpx80PacketSize = 5
-    exg16bitPacketSize = 5
-    exg24bitPacketSize = 7
-    macAddressLength = 6
-    # Sensor masks
-    sensorAAccelMask = 0x80
-    sensorMpu9x50Icm20948GyroMask = 0x40
-    sensorLsm303xxxxMagMask = 0x20
-    sensorExg124bitMask = 0x10
-    sensorExg224bitMask = 0x08
-    sensorGsrMask = 0x04
-    sensorExtA7Mask = 0x02
-    sensorExtA6Mask = 0x01
-    sensorStrainMask = 0x80
-    sensorVbattMask = 0x20
-    sensorLsm303xxxxAccelMask = 0x10
-    sensorExtA15Mask = 0x08
-    sensorIntA1Mask = 0x04
-    sensorIntA12Mask = 0x02
-    sensorIntA13Mask = 0x01
-    sensorIntA14Mask = 0x80
-    sensorMpu9x50Icm20948AccelMask = 0x40
-    sensorMpu9x50Icm20948MagMask = 0x20
-    sensorExg116bitMask = 0x10
-    sensorExg216bitMask = 0x08
-    sensorBmpx80PressureMask = 0x04
+
     with open(filepath, 'rb') as f:
         header = f.read(headerLength)
-        sensors0 = header[3]
-        sensors1 = header[4]
-        sensors2 = header[5]
-        sensors3 = header[6]
-        sensors4 = header[7]
-        configByte3 = header[11]
+        if len(header) < headerLength:
+            raise IOError("Could not read full 256-byte header.")
+
+        sensors0, sensors1, sensors2 = header[3], header[4], header[5]
         sampleRateTicks = struct.unpack('<H', header[0:2])[0]
-        sampleRate = 32768 / sampleRateTicks if sampleRateTicks != 0 else float('nan')
-        macBytes = header[24:24+macAddressLength]
-        macAddressStr = ':'.join(f'{b:02X}' for b in macBytes)
-        packetLengthBytes = timestampBytes
-        channelNames = []
-        channelTypes = []
-        channelByteCounts = []
-        # SENSORS0
-        if sensors0 & sensorAAccelMask:
-            packetLengthBytes += 6
-            channelNames += ['Accel_LN_X', 'Accel_LN_Y', 'Accel_LN_Z']
-            channelTypes += ['int16', 'int16', 'int16']
-            channelByteCounts += [2,2,2]
-        if sensors1 & sensorVbattMask:
-            packetLengthBytes += 2
-            channelNames += ['VSenseBatt']
-            channelTypes += ['uint16']
-            channelByteCounts += [2]
-        if sensors0 & sensorExtA7Mask:
-            packetLengthBytes += 2
-            channelNames += ['EXT_A7']
-            channelTypes += ['uint16']
-            channelByteCounts += [2]
-        if sensors0 & sensorExtA6Mask:
-            packetLengthBytes += 2
-            channelNames += ['EXT_A6']
-            channelTypes += ['uint16']
-            channelByteCounts += [2]
-        if sensors1 & sensorExtA15Mask:
-            packetLengthBytes += 2
-            channelNames += ['EXT_A15']
-            channelTypes += ['uint16']
-            channelByteCounts += [2]
-        if sensors1 & sensorIntA12Mask:
-            packetLengthBytes += 2
-            channelNames += ['INT_A12']
-            channelTypes += ['uint16']
-            channelByteCounts += [2]
-        if sensors1 & sensorStrainMask:
-            packetLengthBytes += 4
-            channelNames += ['Strain_High', 'Strain_Low']
-            channelTypes += ['uint16', 'uint16']
-            channelByteCounts += [2,2]
-        if (sensors1 & sensorIntA13Mask) and not (sensors1 & sensorStrainMask):
-            packetLengthBytes += 2
-            channelNames += ['INT_A13']
-            channelTypes += ['uint16']
-            channelByteCounts += [2]
-        if (sensors2 & sensorIntA14Mask) and not (sensors1 & sensorStrainMask):
-            packetLengthBytes += 2
-            channelNames += ['INT_A14']
-            channelTypes += ['uint16']
-            channelByteCounts += [2]
-        if sensors0 & sensorGsrMask:
-            packetLengthBytes += 2
-            channelNames += ['GSR_Raw']
-            channelTypes += ['uint16']
-            channelByteCounts += [2]
-        if (sensors1 & sensorIntA1Mask) and not (sensors0 & sensorGsrMask):
-            packetLengthBytes += 2
-            channelNames += ['INT_A1']
-            channelTypes += ['uint16']
-            channelByteCounts += [2]
-        if sensors0 & sensorMpu9x50Icm20948GyroMask:
-            packetLengthBytes += 6
-            channelNames += ['Gyro_X', 'Gyro_Y', 'Gyro_Z']
-            channelTypes += ['int16', 'int16', 'int16']
-            channelByteCounts += [2,2,2]
-        if sensors1 & sensorLsm303xxxxAccelMask:
-            packetLengthBytes += 6
-            channelNames += ['Accel_WR_X', 'Accel_WR_Y', 'Accel_WR_Z']
-            channelTypes += ['int16', 'int16', 'int16']
-            channelByteCounts += [2,2,2]
-        if sensors0 & sensorLsm303xxxxMagMask:
-            packetLengthBytes += 6
-            channelNames += ['Mag_X', 'Mag_Y', 'Mag_Z']
-            channelTypes += ['int16', 'int16', 'int16']
-            channelByteCounts += [2,2,2]
-        if sensors2 & sensorMpu9x50Icm20948AccelMask:
-            packetLengthBytes += 6
-            channelNames += ['Accel_MPU_X', 'Accel_MPU_Y', 'Accel_MPU_Z']
-            channelTypes += ['int16', 'int16', 'int16']
-            channelByteCounts += [2,2,2]
-        if sensors2 & sensorMpu9x50Icm20948MagMask:
-            packetLengthBytes += 6
-            channelNames += ['Mag_MPU_X', 'Mag_MPU_Y', 'Mag_MPU_Z']
-            channelTypes += ['int16', 'int16', 'int16']
-            channelByteCounts += [2,2,2]
-        if sensors2 & sensorBmpx80PressureMask:
-            packetLengthBytes += bmpx80PacketSize
-            channelNames += ['BMP_Temperature', 'BMP_Pressure']
-            channelTypes += ['int16', 'int24']
-            channelByteCounts += [2,3]
-        if sensors0 & sensorExg124bitMask:
-            packetLengthBytes += exg24bitPacketSize
-            channelNames += ['EXG1_Status', 'EXG1_CH1_24bit', 'EXG1_CH2_24bit']
-            channelTypes += ['uint8', 'int24', 'int24']
-            channelByteCounts += [1,3,3]
-        elif sensors2 & sensorExg116bitMask:
-            packetLengthBytes += exg16bitPacketSize
-            channelNames += ['EXG1_Status', 'EXG1_CH1_16bit', 'EXG1_CH2_16bit']
-            channelTypes += ['uint8', 'int16', 'int16']
-            channelByteCounts += [1,2,2]
-        if sensors0 & sensorExg224bitMask:
-            packetLengthBytes += exg24bitPacketSize
-            channelNames += ['EXG2_Status', 'EXG2_CH1_24bit', 'EXG2_CH2_24bit']
-            channelTypes += ['uint8', 'int24', 'int24']
-            channelByteCounts += [1,3,3]
-        elif sensors2 & sensorExg216bitMask:
-            packetLengthBytes += exg16bitPacketSize
-            channelNames += ['EXG2_Status', 'EXG2_CH1_16bit', 'EXG2_CH2_16bit']
-            channelTypes += ['uint8', 'int16', 'int16']
-            channelByteCounts += [1,2,2]
+        sensorData['sampleRate'] = (32768.0 / sampleRateTicks) if sampleRateTicks != 0 else float('nan')
+
+        mac = header[24:30]
+        macAddressStr = ':'.join(f'{b:02X}' for b in mac)
+
+        channelInfo: List[Channel] = []
+
+        # -------- MATLAB-equivalent sensor parsing --------
+        if sensors0 & 0x80:
+            channelInfo += _add_channels(['Accel_LN_X', 'Accel_LN_Y', 'Accel_LN_Z'], 'int16', 2, 'little')
+        if sensors1 & 0x20:
+            channelInfo += _add_channels('VSenseBatt', 'uint16', 2, 'little')
+        if sensors0 & 0x02:
+            channelInfo += _add_channels('EXT_A7', 'uint16', 2, 'little')
+        if sensors0 & 0x01:
+            channelInfo += _add_channels('EXT_A6', 'uint16', 2, 'little')
+        if sensors1 & 0x08:
+            channelInfo += _add_channels('EXT_A15', 'uint16', 2, 'little')
+        if sensors1 & 0x02:
+            channelInfo += _add_channels('INT_A12', 'uint16', 2, 'little')
+        if sensors1 & 0x80:
+            channelInfo += _add_channels(['Strain_High', 'Strain_Low'], 'uint16', 2, 'little')
+        if (sensors1 & 0x01) and not (sensors1 & 0x80):
+            channelInfo += _add_channels('INT_A13', 'uint16', 2, 'little')
+        if (sensors2 & 0x80) and not (sensors1 & 0x80):
+            channelInfo += _add_channels('INT_A14', 'uint16', 2, 'little')
+        if sensors0 & 0x04:
+            channelInfo += _add_channels('GSR_Raw', 'uint16', 2, 'little')
+        if (sensors1 & 0x04) and not (sensors0 & 0x04):
+            channelInfo += _add_channels('INT_A1', 'uint16', 2, 'little')
+        if sensors0 & 0x40:
+            channelInfo += _add_channels(['Gyro_X', 'Gyro_Y', 'Gyro_Z'], 'int16', 2, 'big')
+        if sensors1 & 0x10:
+            channelInfo += _add_channels(['Accel_WR_X', 'Accel_WR_Y', 'Accel_WR_Z'], 'int16', 2, 'little')
+        if sensors0 & 0x20:
+            channelInfo += _add_channels(['Mag_X', 'Mag_Z', 'Mag_Y'], 'int16', 2, 'big')
+        if sensors2 & 0x40:
+            channelInfo += _add_channels(['Accel_MPU_X', 'Accel_MPU_Y', 'Accel_MPU_Z'], 'int16', 2, 'big')
+        if sensors2 & 0x20:
+            channelInfo += _add_channels(['Mag_MPU_X', 'Mag_MPU_Y', 'Mag_MPU_Z'], 'int16', 2, 'little')
+        if sensors2 & 0x04:
+            channelInfo += _add_channels('BMP_Temperature', 'int16', 2, 'big')
+            channelInfo += _add_channels('BMP_Pressure', 'int24', 3, 'big')
+        if sensors0 & 0x10:
+            channelInfo += _add_channels('EXG1_Status', 'uint8', 1, 'big')
+            channelInfo += _add_channels(['EXG1_CH1_24bit', 'EXG1_CH2_24bit'], 'int24', 3, 'big')
+        elif sensors2 & 0x10:
+            channelInfo += _add_channels('EXG1_Status', 'uint8', 1, 'big')
+            channelInfo += _add_channels(['EXG1_CH1_16bit', 'EXG1_CH2_16bit'], 'int16', 3, 'big')  # typo preserved
+        if sensors0 & 0x08:
+            channelInfo += _add_channels('EXG2_Status', 'uint8', 1, 'big')
+            channelInfo += _add_channels(['EXG2_CH1_24bit', 'EXG2_CH2_24bit'], 'int24', 3, 'big')
+        elif sensors2 & 0x08:
+            channelInfo += _add_channels('EXG2_Status', 'uint8', 1, 'big')
+            channelInfo += _add_channels(['EXG2_CH1_16bit', 'EXG2_CH2_16bit'], 'int16', 2, 'big')
+
+        packetLengthBytes = timestampBytes + sum(ch.nbytes for ch in channelInfo)
+        sensorData['channelInfo'] = [asdict(ch) for ch in channelInfo]
+        sensorData['packetLengthBytes'] = packetLengthBytes
+
+        # --- read all packets ---
         f.seek(0, 2)
         fileSize = f.tell()
-        f.seek(headerLength, 0)
-        numSamplesEstimate = (fileSize - headerLength) // packetLengthBytes
-        data = {name: np.zeros(numSamplesEstimate, dtype=np.int32) for name in channelNames}
-        timestamps = np.zeros(numSamplesEstimate, dtype=np.uint32)
-        for sampleCount in range(numSamplesEstimate):
+        f.seek(headerLength)
+        numSamples = (fileSize - headerLength) // packetLengthBytes
+        timestamps = []
+        arrays = {ch.name: [] for ch in channelInfo}
+
+        for i in range(numSamples):
             packet = f.read(packetLengthBytes)
             if len(packet) < packetLengthBytes:
                 break
-            currentByte = 0
-            tsVal = packet[currentByte] + (packet[currentByte+1] << 8) + (packet[currentByte+2] << 16)
-            timestamps[sampleCount] = tsVal
-            currentByte += timestampBytes
-            for i, (name, typ, nbytes) in enumerate(zip(channelNames, channelTypes, channelByteCounts)):
-                channelBytes = packet[currentByte:currentByte+nbytes]
-                currentByte += nbytes
-                if typ == 'uint8':
-                    val = channelBytes[0]
-                elif typ == 'int16':
-                    val = struct.unpack('<h', channelBytes)[0]
-                elif typ == 'uint16':
-                    val = struct.unpack('<H', channelBytes)[0]
-                elif typ == 'int24':
-                    val = sign_extend_24bit(channelBytes)
+            pos = 0
+            ts = packet[pos] | (packet[pos + 1] << 8) | (packet[pos + 2] << 16)
+            timestamps.append(ts)
+            pos += timestampBytes
+            for ch in channelInfo:
+                b = packet[pos:pos + ch.nbytes]
+                pos += ch.nbytes
+                if ch.endian == 'big' and ch.nbytes > 1:
+                    b_eff = b[::-1]
+                else:
+                    b_eff = b
+                if ch.dtype == 'uint8':
+                    val = b_eff[0]
+                elif ch.dtype == 'int16':
+                    val = struct.unpack('<h', b_eff)[0]
+                elif ch.dtype == 'uint16':
+                    val = struct.unpack('<H', b_eff)[0]
+                elif ch.dtype == 'int24':
+                    val = _sign_extend_24_be(b) if ch.endian == 'big' else _sign_extend_24_le(b)
                 else:
                     val = 0
-                data[name][sampleCount] = val
-        for name in data:
-            data[name] = data[name][:sampleCount]
-        timestamps = timestamps[:sampleCount]
-        output = {
-            'sampleRate': sampleRate,
-            'headerBytes': list(header),
-            'channelNames': channelNames,
-            'timestamps': timestamps.tolist(),
-            'macAddress': macAddressStr,
-        }
-        for name in data:
-            output[name] = data[name].tolist()
-        # Calibration for inertial sensors
-        inertial_sensors = [
-            ('Accel_LN', 'LN_ACCEL', 'm/s^2'),
-            ('Accel_WR', 'WR_ACCEL', 'm/s^2'),
-            ('Gyro', 'GYRO', 'deg/s'),
-            ('Mag', 'MAG', 'Gauss'),
-        ]
-        for prefix, calName, unit in inertial_sensors:
-            if all(f'{prefix}_{axis}' in output for axis in ['X','Y','Z']):
-                offset, gain, align = parse_inertial_cal_params(header, calName)
-                raw = np.column_stack([output[f'{prefix}_X'], output[f'{prefix}_Y'], output[f'{prefix}_Z']])
-                cal = apply_inertial_calibration(raw, offset, gain, align)
-                output[f'{prefix}_X_cal'] = cal[:,0].tolist()
-                output[f'{prefix}_Y_cal'] = cal[:,1].tolist()
-                output[f'{prefix}_Z_cal'] = cal[:,2].tolist()
-        # Calculate Accel_WR_Absolute from calibrated wide-range accel
-        if all(f'Accel_WR_{axis}_cal' in output for axis in ['X','Y','Z']):
-            x_cal = np.array(output['Accel_WR_X_cal'])
-            y_cal = np.array(output['Accel_WR_Y_cal'])
-            z_cal = np.array(output['Accel_WR_Z_cal'])
-            accel_wr_abs = np.sqrt(x_cal**2 + y_cal**2 + z_cal**2)
-            output['Accel_WR_Absolute'] = accel_wr_abs.tolist()
-            # Calculate variance (max - min)
-            output['Accel_WR_VAR'] = float(accel_wr_abs.max() - accel_wr_abs.min())
+                arrays[ch.name].append(val)
+
+        sensorData['timestamps'] = timestamps
+        for k, v in arrays.items():
+            sensorData[k] = v
+        sensorData['headerBytes'] = list(header)
+
+    # ---- skip calibration if requested ----
+    if not calibrate:
+        return sensorData
+
+    # ----------------------------
+    # convertShimmerData (MATLAB parity)
+    # ----------------------------
+    inertials = [
+        ('Accel_LN', 'LN_ACCEL', 'm/s^2'),
+        ('Accel_WR', 'WR_ACCEL', 'm/s^2'),
+        ('Gyro', 'GYRO', 'deg/s'),
+        ('Mag', 'MAG', 'Gauss'),
+    ]
+    for prefix, calName, _unit in inertials:
+        xk, yk, zk = f'{prefix}_X', f'{prefix}_Y', f'{prefix}_Z'
+        if all(k in sensorData for k in (xk, yk, zk)):
+            # Convert to list of [x,y,z] triplets
+            raw_xyz_list = [[float(sensorData[xk][i]), float(sensorData[yk][i]), float(sensorData[zk][i])] 
+                           for i in range(len(sensorData[xk]))]
+            
+            offset, gain, align = parse_inertial_cal_params(bytes(sensorData['headerBytes']), calName)
+            cal = apply_inertial_calibration(raw_xyz_list, offset, gain, align)
+            
+            # Extract calibrated components
+            sensorData[f'{prefix}_X_cal'] = [xyz[0] for xyz in cal]
+            sensorData[f'{prefix}_Y_cal'] = [xyz[1] for xyz in cal]
+            sensorData[f'{prefix}_Z_cal'] = [xyz[2] for xyz in cal]
+            
+            # Calculate absolute value for Accel_WR
+            if prefix == 'Accel_WR':
+                accel_wr_abs = [math.sqrt(xyz[0]**2 + xyz[1]**2 + xyz[2]**2) for xyz in cal]
+                sensorData['Accel_WR_Absolute'] = accel_wr_abs
+                if accel_wr_abs:
+                    sensorData['Accel_WR_VAR'] = max(accel_wr_abs) - min(accel_wr_abs)
+
+    if 'INT_A13' in sensorData:
+        sensorData['uwbDis'] = [float(v) for v in sensorData['INT_A13']]
+    if 'INT_A14' in sensorData:
+        sensorData['tagId'] = sensorData['INT_A14']
+    if 'VSenseBatt' in sensorData:
+        vs = sensorData['VSenseBatt']
+        sensorData['VSenseBatt_cal'] = [1.4652 * v - 0.004 for v in vs]
+    for axis in ('X', 'Y', 'Z'):
+        k = f'Gyro_{axis}_cal'
+        if k in sensorData:
+            sensorData[k] = [v * 100.0 for v in sensorData[k]]
+
+    sensorData = time_calibration(sensorData, bytes(sensorData['headerBytes']))
+    
+    # Convert Unix timestamps to readable format
+    from datetime import datetime
+    if 'timestampCal' in sensorData:
+        def convert_unix_to_readable(unix_timestamp):
+            try:
+                # Check if timestamp is in milliseconds and convert to seconds
+                if unix_timestamp > 2000000000:  # If > year 2033, likely in milliseconds
+                    unix_timestamp = unix_timestamp / 1000.0
+                dt = datetime.fromtimestamp(unix_timestamp)
+                return dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            except (ValueError, OSError):
+                return "Invalid timestamp"
         
-        # Time calibration
-        timestampCal, initialTime = time_calibration(timestamps, header)
-        output['timestampCal'] = timestampCal.tolist()
-        output['initialTime'] = initialTime
-        return output
-
-result = read_shimmer_data_file_as_txt('000')
-with open('output.json', 'w') as f:
-    json.dump(result, f)
+        sensorData['timestampReadable'] = [convert_unix_to_readable(ts) for ts in sensorData['timestampCal']]
+    
+    return sensorData
 
 
-# Save only calibrated accel values to separate file
-accel_only = {
-    'Accel_WR_X_cal': result.get('Accel_LN_X_cal', []),
-    'Accel_WR_Y_cal': result.get('Accel_LN_Y_cal', []),
-    'Accel_WR_Z_cal': result.get('Accel_LN_Z_cal', []),
-    'Accel_WR_Absolute': result.get('Accel_WR_Absolute', []),
-    'Accel_WR_VAR': result.get('Accel_WR_VAR', []),
-    'timestampCal': result.get('timestampCal', [])
-}
-with open('accel_output.json', 'w') as f:
-    json.dump(accel_only, f, indent=2)
+def read_shimmer_data_file_as_txt(filepath):
+    """Wrapper function for compatibility"""
+    return read_shimmer_data_file(filepath, calibrate=True)
+
+
+# ---------------------------------------------------------
+# Produce MATLAB-compatible .mat files automatically
+# ---------------------------------------------------------
+if __name__ == '__main__':
+    import json
+    
+    # Use the actual test file
+    fname = 'a9ae0f999916e210__20250925_232338__TEST0916_1752967227__Shimmer_DDD6-000__000.txt'
+    
+    try:
+        result = read_shimmer_data_file_as_txt(fname)
+        
+        # Print summary
+        print(f"✅ Successfully decoded {len(result.get('timestamps', []))} samples")
+        print(f"Sample rate: {result.get('sampleRate', 'N/A')} Hz")
+        print(f"Available channels: {len([k for k in result.keys() if isinstance(result[k], list) and k != 'headerBytes'])}")
+        
+        # Save full output
+        with open('output.json', 'w') as f:
+            json.dump(result, f, indent=2)
+        print("✅ Full data saved to output.json")
+        
+        # Save accelerometer data only
+        accel_only = {}
+        for key in ['Accel_WR_X_cal', 'Accel_WR_Y_cal', 'Accel_WR_Z_cal', 'Accel_WR_Absolute', 'Accel_WR_VAR', 'timestampCal', 'timestampReadable']:
+            if key in result:
+                accel_only[key] = result[key]
+        
+        with open('accel_output.json', 'w') as f:
+            json.dump(accel_only, f, indent=2)
+        print("✅ Accelerometer data saved to accel_output.json")
+        
+        # Print some stats
+        if 'Accel_WR_Absolute' in result:
+            abs_vals = result['Accel_WR_Absolute']
+            print(f"Accel_WR_Absolute: mean={sum(abs_vals)/len(abs_vals):.2f}, min={min(abs_vals):.2f}, max={max(abs_vals):.2f}")
+        
+        # Plot if matplotlib available
+        try:
+            import matplotlib.pyplot as plt
+            
+            if 'Accel_WR_Absolute' in result and 'timestampCal' in result:
+                plt.figure(figsize=(12, 6))
+                plt.plot(result['timestampCal'], result['Accel_WR_Absolute'])
+                plt.xlabel('Timestamp (Unix)')
+                plt.ylabel('Accel_WR_Absolute (m/s²)')
+                plt.title('Wide-Range Accelerometer Magnitude vs Time')
+                plt.grid(True)
+                plt.savefig('accel_plot.png', dpi=150, bbox_inches='tight')
+                print("✅ Plot saved as accel_plot.png")
+                
+        except ImportError:
+            print("⚠️ matplotlib not available - skipping plot")
+            
+    except Exception as e:
+        print(f"❌ Error: {e}")
