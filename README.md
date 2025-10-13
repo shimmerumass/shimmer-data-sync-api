@@ -1,11 +1,34 @@
-# FastAPI S3 Sync Service
+# Shimmer Data Sync API
 
-This project provides a FastAPI-based API for syncing text files to AWS S3. It allows uploading, listing, and downloading text files from a specified S3 bucket.
+RESTful API for managing and processing Shimmer wearable sensor data in the cloud. Handles file uploads to S3, decodes binary sensor streams with inertial calibration, stores metadata in DynamoDB, and provides endpoints for patient management and data retrieval.
 
 ## Features
-- Upload text files to S3
-- List files in the S3 bucket
-- Download files from S3
+
+### Data Management
+- Upload Shimmer sensor files (.txt) to S3
+- Automatic filename parsing (device, timestamp, experiment, shimmer device)
+- Patient-device mapping with DynamoDB
+- Batch file downloads (by day, by user/date)
+- Generate presigned upload/download URLs
+
+### Sensor Data Processing
+- Binary sensor data decoding (Shimmer3 format)
+- Multi-channel support: Accelerometer (Low-Noise & Wide-Range), Gyroscope, Magnetometer
+- Inertial sensor calibration (offset, gain, alignment matrix)
+- Time synchronization with phone RTC and rollover correction
+- Computed metrics: Accel_WR_Absolute (magnitude), Accel_WR_VAR (variance)
+
+### Smart Storage
+- **Full decoded data** → S3 as JSON (handles 60k+ samples)
+- **Summary metrics only** → DynamoDB (stays under 400KB limit)
+- Scalable architecture for large sensor datasets
+
+### API Endpoints
+- File operations (upload, download, list, search)
+- Device-patient mapping (CRUD operations)
+- File metadata with grouping by device/date
+- Decode and store sensor data
+- Retrieve full decoded data from S3
 
 ## Setup
 1. Install dependencies:
