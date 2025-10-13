@@ -98,8 +98,12 @@ Shimmer files can contain 60,000+ samples, making arrays too large for DynamoDB'
 1. **Full decoded data** → Stored in S3 at `decoded/{filename}.json`
 2. **Summary metrics** → Stored in DynamoDB (num_samples, accel_wr_var, etc.)
 3. **Reference link** → DynamoDB item includes `decoded_s3_key` for full data retrieval
+4. **Recording timestamp** → DynamoDB includes `recordedTimestamp` field with human-readable ISO format timestamp (e.g., `2024-09-24T22:38:36+00:00`)
+   - Shimmer files store timestamps as Unix timestamps (seconds since epoch) in the `timestampCal` array
+   - The first value from `timestampCal[0]` is extracted and converted from Unix format to ISO 8601 format with UTC timezone
+   - This provides quick access to recording start time without fetching the full 60k-sample timestamp array from S3
 
-This keeps DynamoDB items small (~2-5 KB) while preserving full data access via S3.
+This keeps DynamoDB items small (~2-5 KB) while preserving full data access via S3 and providing quick access to key metadata like recording start time.
 
 ## Project Structure
 ```
