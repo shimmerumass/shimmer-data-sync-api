@@ -112,3 +112,6 @@ This keeps DynamoDB items small (~2-5 KB) while preserving full data access via 
 
 ## Contributing
 This project is part of the Shimmer UMass research platform. For access or collaboration, contact the Shimmer research team.
+
+## License
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
