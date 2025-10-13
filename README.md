@@ -12,11 +12,34 @@ RESTful API for managing and processing Shimmer wearable sensor data in the clou
 - Generate presigned upload/download URLs
 
 ### Sensor Data Processing
-- Binary sensor data decoding (Shimmer3 format)
-- Multi-channel support: Accelerometer (Low-Noise & Wide-Range), Gyroscope, Magnetometer
-- Inertial sensor calibration (offset, gain, alignment matrix)
-- Time synchronization with phone RTC and rollover correction
-- Computed metrics: Accel_WR_Absolute (magnitude), Accel_WR_VAR (variance)
+- **Binary sensor data decoding** (Shimmer3 format)
+  - 256-byte header containing device info, sample rate, enabled sensors, calibration parameters
+  - Variable-length data packets (3-byte timestamp + sensor channels)
+  
+- **Multi-channel support** with raw and calibrated data:
+  - **Accel_LN** (Low-Noise Accelerometer): X, Y, Z axes - high precision, lower range
+  - **Accel_WR** (Wide-Range Accelerometer): X, Y, Z axes - lower precision, higher range
+  - **Gyro** (Gyroscope): X, Y, Z axes - angular velocity
+  - **Mag** (Magnetometer): X, Y, Z axes - magnetic field
+  - Each channel provides both raw values and calibrated (_cal) values
+  
+- **Inertial sensor calibration**
+  - Offset correction (3 values per sensor)
+  - Gain scaling (3 values per sensor)
+  - Alignment matrix (3x3, values scaled by 100)
+  - Applied to all inertial sensors (Accel_LN, Accel_WR, Gyro, Mag)
+  
+- **Time synchronization** with phone RTC and rollover correction
+  - Raw 24-bit timestamps from sensor packets (wraps at 16,777,216 ticks)
+  - Rollover detection and correction (when timestamps wrap around 2^24)
+  - Initial RTC sync from phone timestamp (Unix epoch)
+  - Shimmer clock runs at 32,768 Hz
+  - Final output: Unix timestamps in `timestampCal` array
+  - Conversion to human-readable ISO 8601 format in `timestampReadable`
+  
+- **Computed metrics**:
+  - `Accel_WR_Absolute`: Magnitude (√(x² + y² + z²)) for each sample
+  - `Accel_WR_VAR`: Range (max - min) of absolute acceleration across recording
 
 ### Smart Storage
 - **Full decoded data** → S3 as JSON (handles 60k+ samples)
