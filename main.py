@@ -16,6 +16,7 @@ from decimal import Decimal
 from fastapi import Request
 import struct
 from shimmer_decode import read_shimmer_dat_file_as_txt
+from shimmerCaliberate import read_shimmer_dat
 
 # Load environment variables from .env if present
 load_dotenv()
@@ -954,9 +955,9 @@ def get_combined_meta():
                     patient = "none"
             # Exclude EXCLUDE_KEYS from the output record
             EXCLUDE_KEYS = {
-                "timestamp", "headerInfo", "headerBytes", "sampleRate", "channelNames", "packetLengthBytes",
-                "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14", "Gyro_X", "Gyro_Y", "Gyro_Z",
-                "Accel_WR_X", "Accel_WR_y", "Accel_WR_Z", "Mag_X", "Mag_y", "Mag_Z"
+            "timestamp", "headerInfo", "headerBytes", "sampleRate", "channelNames", "packetLengthBytes",
+            "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14", "Gyro_X", "Gyro_Y", "Gyro_Z",
+            "Accel_WR_X", "Accel_WR_y", "Accel_WR_Z", "Mag_X", "Mag_Y", "Mag_Z", "Accel_WR_Y", 
             }
             record = {k: v for k, v in item.items() if k not in EXCLUDE_KEYS}
             group_key = (device, patient, date)
@@ -1053,14 +1054,15 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
             meta["patient"] = patient
 
         # Use shimmer_decode for full sensor decode
-        decoded = read_shimmer_dat_file_as_txt(file_bytes)
+        # decoded = read_shimmer_dat_file_as_txt(file_bytes)
+        decode = decoded = read_shimmer_dat(file_bytes)
 
 
         # Filter out specified attributes and sensor channels before saving
         EXCLUDE_KEYS = {
             "timestamp", "headerInfo", "headerBytes", "sampleRate", "channelNames", "packetLengthBytes",
             "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14", "Gyro_X", "Gyro_Y", "Gyro_Z",
-            "Accel_WR_X", "Accel_WR_y", "Accel_WR_Z", "Mag_X", "Mag_y", "Mag_Z"
+            "Accel_WR_X", "Accel_WR_y", "Accel_WR_Z", "Mag_X", "Mag_Y", "Mag_Z", "Accel_WR_Y", 
         }
 
         def filter_dict(d):
