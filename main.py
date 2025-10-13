@@ -1087,7 +1087,19 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
                 return [convert_floats(v) for v in obj]
             return obj
 
+        # Extract recordedTimestamp from first timestampCal value and convert from Unix to ISO format
+        recorded_timestamp = None
+        if "timestampCal" in decoded and isinstance(decoded["timestampCal"], list) and len(decoded["timestampCal"]) > 0:
+            try:
+                unix_timestamp = float(decoded["timestampCal"][0])
+                # Convert Unix timestamp to ISO format
+                recorded_timestamp = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc).isoformat()
+            except (ValueError, TypeError, OSError):
+                recorded_timestamp = None
+
         merged = {**meta, **small_data, "decode_s3_key": decode_key}
+        if recorded_timestamp is not None:
+            merged["recordedTimestamp"] = recorded_timestamp
         item = convert_floats(merged)
         item["updatedAt"] = datetime.now(timezone.utc).isoformat()
 
