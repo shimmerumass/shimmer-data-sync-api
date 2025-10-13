@@ -30,10 +30,7 @@ RESTful API for managing and processing Shimmer wearable sensor data in the clou
   - Applied to all inertial sensors (Accel_LN, Accel_WR, Gyro, Mag)
   
 - **Time synchronization** with phone RTC and rollover correction
-  - Raw 24-bit timestamps from sensor packets (wraps at 16,777,216 ticks)
-  - Rollover detection and correction (when timestamps wrap around 2^24)
   - Initial RTC sync from phone timestamp (Unix epoch)
-  - Shimmer clock runs at 32,768 Hz
   - Final output: Unix timestamps in `timestampCal` array
   - Conversion to human-readable ISO 8601 format in `timestampReadable`
   
