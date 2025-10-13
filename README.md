@@ -30,21 +30,86 @@ RESTful API for managing and processing Shimmer wearable sensor data in the clou
 - Decode and store sensor data
 - Retrieve full decoded data from S3
 
+## Tech Stack
+- **Backend**: FastAPI with Mangum (AWS Lambda compatible)
+- **Storage**: AWS S3 (raw files + decoded JSON)
+- **Database**: AWS DynamoDB (metadata + summaries)
+- **Deployment**: AWS Lambda with API Gateway
+
 ## Setup
+
+### Local Development
 1. Install dependencies:
    ```sh
-   pip install fastapi uvicorn boto3 python-multipart
+   pip install fastapi uvicorn boto3 python-dotenv mangum pydantic
    ```
-2. Set your AWS credentials as environment variables or in `~/.aws/credentials`.
-3. Run the server:
+
+2. Configure environment variables (`.env`):
+   ```env
+   S3_BUCKET=your-bucket-name
+   DDB_TABLE=device-patient-mapping-table
+   DDB_FILE_TABLE=file-metadata-table
+   AWS_REGION=us-east-1
+   ```
+
+3. Run locally:
    ```sh
    uvicorn main:app --reload
    ```
 
-## Endpoints
-- `POST /upload/` - Upload a text file
-- `GET /files/` - List files in the bucket
-- `GET /download/{filename}` - Download a file
+### AWS Lambda Deployment
+1. Package dependencies:
+   ```sh
+   pip install -t lambda_package/ -r requirements.txt
+   cp main.py shimmer_decode.py shimmerCalibrate.py lambda_package/
+   cd lambda_package && zip -r ../lambda_package.zip .
+   ```
 
-## Configuration
-- Configure your S3 bucket and AWS region in the environment or in the code.
+2. Deploy to Lambda and configure API Gateway
+
+## Key Endpoints
+
+### File Management
+- `POST /upload/` - Upload Shimmer sensor file
+- `GET /files/` - List all files
+- `GET /files/metadata/` - Get files grouped by device/date/patient
+- `GET /files/combined-meta/` - Get combined metadata from DynamoDB
+- `GET /download/{filename}` - Download file
+- `POST /download-zip-by-day/` - Download all files for a date
+- `POST /download-zip-by-user-date/` - Download files for user/date
+
+### Sensor Data Processing
+- `GET /file/decode/` - Decode sensor file (returns full data)
+- `POST /decode-and-store/` - Decode and store (summary in DDB, full data in S3)
+- `GET /file/decoded-full/` - Retrieve full decoded data from S3
+
+### Device/Patient Mapping
+- `GET /ddb/device-patient-map` - List all mappings
+- `GET /ddb/device-patient-map/{device}` - Get mapping for device
+- `PUT /ddb/device-patient-map/{device}` - Create/update mapping
+- `DELETE /ddb/device-patient-map/{device}` - Delete mapping
+- `GET /devices/unregistered` - Find devices without patient mapping
+
+## Architecture Notes
+
+### DynamoDB Size Limit Solution
+Shimmer files can contain 60,000+ samples, making arrays too large for DynamoDB's 400KB item limit. Our solution:
+
+1. **Full decoded data** → Stored in S3 at `decoded/{filename}.json`
+2. **Summary metrics** → Stored in DynamoDB (num_samples, accel_wr_var, etc.)
+3. **Reference link** → DynamoDB item includes `decoded_s3_key` for full data retrieval
+
+This keeps DynamoDB items small (~2-5 KB) while preserving full data access via S3.
+
+## Project Structure
+```
+.
+├── main.py                    # FastAPI application & endpoints
+├── shimmer_decode.py          # Binary decoder (legacy format)
+├── shimmerCalibrate.py        # Calibrated decoder with inertial cal
+├── lambda_package/            # AWS Lambda deployment package
+└── README.md
+```
+
+## Contributing
+This project is part of the Shimmer UMass research platform. For access or collaboration, contact the Shimmer research team.
