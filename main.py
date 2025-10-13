@@ -909,20 +909,20 @@ def get_deconstructed_files():
     except (BotoCoreError, ClientError, Exception) as e:
         return {"data": [], "error": str(e)}
 
-# ...existing code...
 
 @app.get("/files/combined-meta/")
 def get_combined_meta():
     """
-    Returns combined metadata and decoded header info for all files in S3,
-    grouped by device, date, and experiment_name, with decoded info for both shimmers.
-    Skips .zip files.
+    Combines decoded file metadata from DynamoDB with patient mapping.
+    Each record includes S3 pointer ('decode_s3_key') to full decoded arrays.
+    Excludes heavy fields like headerBytes and raw sensor channels.
     """
     try:
-        # Read all decoded file metadata from DynamoDB file table
+        # ----------- Load decoded metadata -----------
         file_table_name = os.getenv("DDB_FILE_TABLE")
         if not file_table_name:
             return {"data": [], "error": "DDB_FILE_TABLE env not set"}
+
         ddb = boto3.resource("dynamodb")
         file_table = ddb.Table(file_table_name)
         items = []
@@ -935,51 +935,52 @@ def get_combined_meta():
             else:
                 break
 
-        # Group by device and date, fetch patient name using direct DynamoDB get_item
-        from collections import defaultdict
-        ddb = boto3.resource("dynamodb")
+        # ----------- Load patient mapping -----------
         mapping_table_name = os.getenv("DDB_TABLE")
         mapping_table = ddb.Table(mapping_table_name) if mapping_table_name else None
+
+        from collections import defaultdict
         grouped = defaultdict(lambda: {"shimmer1_decoded": [], "shimmer2_decoded": []})
+
         for item in items:
             device = item.get("device", "none")
             date = item.get("date", "none")
             shimmer_name = item.get("shimmer_device", "none")
-            # Fetch patient name using get_item from mapping table
+            decode_s3_key = item.get("decode_s3_key", None)
+
+            # Get patient
             patient = "none"
             if mapping_table and device != "none":
                 try:
                     resp = mapping_table.get_item(Key={"device": device})
                     patient = resp.get("Item", {}).get("patient", "none")
                 except Exception:
-                    patient = "none"
-            # Exclude EXCLUDE_KEYS from the output record
-            EXCLUDE_KEYS = {
-            "timestamp", "headerInfo", "headerBytes", "sampleRate", "channelNames", "packetLengthBytes",
-            "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14", "Gyro_X", "Gyro_Y", "Gyro_Z",
-            "Accel_WR_X", "Accel_WR_y", "Accel_WR_Z", "Mag_X", "Mag_Y", "Mag_Z", "Accel_WR_Y", 
-            }
+                    pass
+
+            # Remove unneeded heavy keys (just in case)
+            EXCLUDE_KEYS = {"headerBytes", "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z",
+                            "Gyro_X", "Gyro_Y", "Gyro_Z", "Mag_X", "Mag_Y", "Mag_Z"}
             record = {k: v for k, v in item.items() if k not in EXCLUDE_KEYS}
+            record["decode_s3_key"] = decode_s3_key
+
             group_key = (device, patient, date)
             group = grouped[group_key]
-            if not group.get("device"):
-                group["device"] = device
-                group["date"] = date
-                group["patient"] = patient
+            group["device"] = device
+            group["date"] = date
+            group["patient"] = patient
+
+            if not group.get("shimmer1"):
                 group["shimmer1"] = shimmer_name
-            if shimmer_name == group.get("shimmer1"):
+                group["shimmer1_decoded"].append(record)
+            elif shimmer_name == group.get("shimmer1"):
                 group["shimmer1_decoded"].append(record)
             else:
-                if not group.get("shimmer2"):
-                    group["shimmer2"] = shimmer_name
+                group["shimmer2"] = shimmer_name
                 group["shimmer2_decoded"].append(record)
 
-        # Format output
-        result = []
-        for group in grouped.values():
-            result.append(group)
-
+        result = list(grouped.values())
         return {"data": result, "error": None}
+
     except Exception as e:
         return {"data": [], "error": str(e)}
 
@@ -991,14 +992,15 @@ def get_combined_meta():
 def decode_and_store(full_file_name: str = Body(..., embed=True)):
     """
     Given a full S3 filename, download, decode header, and store metadata in DynamoDB file table.
-    Body: { "full_file_name": "device__timestamp__experiment__shimmer_field__filename.txt" }
+    Large decoded arrays and unnecessary raw fields (like headerBytes) are stored in S3 under 'decode/'.
+    DynamoDB stores only lightweight metadata + pointer to decode_s3_key.
     """
     try:
-        # Download file from S3
+        # ----------- Download file from S3 -----------
         s3_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=full_file_name)
         file_bytes = s3_obj["Body"].read()
 
-        # Parse filename for metadata (reuse from /upload/)
+        # ----------- Parse filename -----------
         def parse_custom_filename(fname):
             parts = fname.split("__")
             device = parts[0] if len(parts) > 0 else "none"
@@ -1006,24 +1008,26 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
             experiment_name = parts[2] if len(parts) > 2 else "none"
             shimmer_field = parts[3] if len(parts) > 3 else "none"
             filename = parts[5] if len(parts) > 5 else "none"
+
             shimmer_device = shimmer_field
             shimmer_day = "none"
             if shimmer_field != "none" and "-" in shimmer_field:
                 shimmer_device, shimmer_day = shimmer_field.rsplit("-", 1)
-            ext = ""
-            part = None
+
+            ext, part = "", None
             if filename and "." in filename:
                 ext = filename.split(".")[-1]
                 part = filename.split(".")[0]
             elif filename:
                 part = filename
-            date = "none"
-            time = "none"
+
+            date, time = "none", "none"
             if timestamp and "_" in timestamp:
                 ymd, hms = timestamp.split("_", 1)
                 if len(ymd) == 8 and len(hms) == 6:
                     date = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
                     time = f"{hms[:2]}:{hms[2:4]}:{hms[4:6]}"
+
             return {
                 "full_file_name": fname,
                 "device": device,
@@ -1039,7 +1043,8 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
             }
 
         meta = parse_custom_filename(full_file_name)
-        # Patient mapping from device
+
+        # ----------- Patient mapping -----------
         patient = None
         try:
             mapping_table_name = os.getenv("DDB_TABLE")
@@ -1053,26 +1058,42 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
         if patient:
             meta["patient"] = patient
 
-        # Use shimmer_decode for full sensor decode
-        # decoded = read_shimmer_dat_file_as_txt(file_bytes)
-        decode = decoded = read_shimmer_dat(file_bytes)
+        # ----------- Decode shimmer data -----------
+        decoded = read_shimmer_dat(file_bytes)
 
-
-        # Filter out specified attributes and sensor channels before saving
+        # ----------- Remove unwanted keys -----------
         EXCLUDE_KEYS = {
             "timestamp", "headerInfo", "headerBytes", "sampleRate", "channelNames", "packetLengthBytes",
-            "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14", "Gyro_X", "Gyro_Y", "Gyro_Z",
-            "Accel_WR_X", "Accel_WR_y", "Accel_WR_Z", "Mag_X", "Mag_Y", "Mag_Z", "Accel_WR_Y", 
+            "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14",
+            "Gyro_X", "Gyro_Y", "Gyro_Z",
+            "Accel_WR_X", "Accel_WR_Y", "Accel_WR_Z",
+            "Mag_X", "Mag_Y", "Mag_Z",
+            "Accel_WR_y"  # in case of typo variant
         }
 
-        def filter_dict(d):
-            if isinstance(d, dict):
-                return {k: filter_dict(v) for k, v in d.items() if k not in EXCLUDE_KEYS}
-            if isinstance(d, list):
-                return [filter_dict(v) for v in d]
-            return d
+        # ----------- Separate large vs small data -----------
+        large_data, small_data = {}, {}
+        for k, v in decoded.items():
+            if k in EXCLUDE_KEYS:
+                continue
+            if isinstance(v, (list, dict)) and len(str(v)) > 2000:
+                large_data[k] = v
+            else:
+                small_data[k] = v
 
+        # ----------- Store large data to S3 -----------
+        import json
+        decode_key = f"decode/{os.path.splitext(full_file_name)[0]}_decoded.json"
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=decode_key,
+            Body=json.dumps(large_data),
+            ContentType="application/json"
+        )
+
+        # ----------- Prepare DynamoDB record -----------
         def convert_floats(obj):
+            from decimal import Decimal
             if isinstance(obj, float):
                 return Decimal(str(obj))
             if isinstance(obj, dict):
@@ -1081,13 +1102,11 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
                 return [convert_floats(v) for v in obj]
             return obj
 
+        merged = {**meta, **small_data, "decode_s3_key": decode_key}
+        item = convert_floats(merged)
+        item["updatedAt"] = datetime.now(timezone.utc).isoformat()
 
-        # Merge meta and decoded, then exclude EXCLUDE_KEYS from the root
-        merged = {**meta, **decoded}
-        item_filtered = {k: v for k, v in merged.items() if k not in EXCLUDE_KEYS}
-        item = convert_floats(item_filtered)
-
-        # Store in DynamoDB file table
+        # ----------- Save to DynamoDB -----------
         file_table_name = os.getenv("DDB_FILE_TABLE")
         if not file_table_name:
             return {"error": "DDB_FILE_TABLE env not set"}
@@ -1095,6 +1114,37 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
         file_table = ddb.Table(file_table_name)
         file_table.put_item(Item=item)
 
-        return {"filename": full_file_name, "message": "Decode and store successful", "ddb_item": item}
+        return {
+            "filename": full_file_name,
+            "message": "Decode and store successful",
+            "ddb_item": item,
+            "decode_s3_key": decode_key
+        }
+
     except (BotoCoreError, ClientError, Exception) as e:
         return {"error": str(e)}
+
+@app.get("/get-decoded-field-direct/")
+def get_decoded_field_direct(
+    full_file_name: str = Query(...),
+    field_name: str = Query(...)
+):
+    """
+    Directly fetches the field from 'decode/{filename_without_ext}_decoded.json' in S3,
+    skipping DynamoDB lookup.
+    """
+    try:
+        import json, os
+        decoded_key = f"decode/{os.path.splitext(full_file_name)[0]}_decoded.json"
+        s3_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=decoded_key)
+        decoded_data = json.loads(s3_obj["Body"].read().decode("utf-8"))
+        if field_name not in decoded_data:
+            raise HTTPException(status_code=404, detail=f"Field '{field_name}' not found.")
+        return {
+            "decode_s3_key": decoded_key,
+            "field": field_name,
+            "length": len(decoded_data[field_name]),
+            "values": decoded_data[field_name]
+        }
+    except (BotoCoreError, ClientError, Exception) as e:
+        raise HTTPException(status_code=500, detail=str(e))
