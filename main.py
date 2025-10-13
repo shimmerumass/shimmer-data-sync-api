@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from fastapi import Request
 import struct
-from shimmer_decode import read_shimmer_dat_file_as_txt
 from shimmerCaliberate import read_shimmer_dat
 
 # Load environment variables from .env if present
@@ -763,21 +762,7 @@ def download_zip_by_user_date(files: List[Dict] = Body(...)):
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Endpoint: decode shimmer file header and sensor info
-@app.get("/file/decode/")
-def decode_shimmer_file(filename: str = Query(...)):
-    """
-    Decodes the header and sensor info from a shimmer .txt file stored in S3.
-    Returns parsed header and sensor info as JSON.
-    """
-    try:
-        s3_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=filename)
-        file_bytes = s3_obj["Body"].read()
-        # Use shimmer_decode to decode full sensor data
-        decoded = read_shimmer_dat_file_as_txt(file_bytes)
-        return decoded
-    except (BotoCoreError, ClientError, Exception) as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/file/parse-name/")
 def parse_filename(filename: str = Query(...)):
