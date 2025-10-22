@@ -56,6 +56,34 @@ RESTful API for managing and processing Shimmer wearable sensor data in the clou
 - **Database**: AWS DynamoDB (metadata + summaries)
 - **Deployment**: AWS Lambda with API Gateway
 
+## Architecture Overview
+
+<p align="center"> 
+ <img src="./architecture.png" width="900" height="100"> <br/>
+  <b>Figure: Shimmer Data Sync API Architecture</b>
+</p>
+
+**User → API → AWS Pipeline**
+
+- Researchers upload Shimmer sensor `.txt` files via REST API.
+
+**FastAPI + Mangum (Lambda)**
+- Entry point that handles routing, upload, decode requests, and DynamoDB/S3 interactions.
+
+**Shimmer Decoder (`shimmerCalibrate.py`)**
+- Parses binary stream → applies calibration → generates calibrated data.
+
+**AWS S3**
+- Stores raw uploaded files.
+- Stores full decoded JSON (large datasets).
+
+**AWS DynamoDB**
+- Stores file metadata and summary metrics.
+- Maintains device–patient mappings.
+
+**Retrieval Layer**
+- Allows fetching summarized data quickly or full decoded datasets from S3 when needed.
+
 ## Setup
 
 ### Local Development
