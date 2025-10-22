@@ -95,9 +95,9 @@ RESTful API for managing and processing Shimmer wearable sensor data in the clou
 2. Configure environment variables (`.env`):
    ```env
    S3_BUCKET=your-bucket-name
-   DDB_TABLE=device-patient-mapping-table
-   DDB_FILE_TABLE=file-metadata-table
-   AWS_REGION=us-east-1
+   DDB_TABLE=your-device-patient-db
+   DDB_FILE_TABLE=your-file-db
+   AWS_REGION=your-region
    ```
 
 3. Run locally:
