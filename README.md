@@ -59,7 +59,7 @@ RESTful API for managing and processing Shimmer wearable sensor data in the clou
 ## Architecture Overview
 
 <p align="center"> 
- <img src="./architecture.png" width="900" height="100"> <br/>
+ <img src="./architecture.png" width="900" height="300"> <br/>
   <b>Figure: Shimmer Data Sync API Architecture</b>
 </p>
 
