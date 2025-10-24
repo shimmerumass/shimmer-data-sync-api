@@ -980,10 +980,13 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
     Large decoded arrays and unnecessary raw fields (like headerBytes) are stored in S3 under 'decode/'.
     DynamoDB stores only lightweight metadata + pointer to decode_s3_key.
     """
+    print(f"[decode-and-store] Called with full_file_name: {full_file_name}")
     try:
         # ----------- Download file from S3 -----------
+        print(f"[decode-and-store] Downloading file from S3: {full_file_name}")
         s3_obj = s3_client.get_object(Bucket=S3_BUCKET, Key=full_file_name)
         file_bytes = s3_obj["Body"].read()
+        print(f"[decode-and-store] Downloaded {len(file_bytes)} bytes from S3.")
 
         # ----------- Parse filename -----------
         def parse_custom_filename(fname):
@@ -1028,6 +1031,7 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
             }
 
         meta = parse_custom_filename(full_file_name)
+        print(f"[decode-and-store] Parsed filename meta: {meta}")
 
         # ----------- Patient mapping -----------
         patient = None
@@ -1038,13 +1042,17 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
                 mapping_table = ddb.Table(mapping_table_name)
                 resp = mapping_table.get_item(Key={"device": meta["device"]})
                 patient = resp.get("Item", {}).get("patient")
-        except Exception:
+                print(f"[decode-and-store] Patient mapping found: {patient}")
+        except Exception as e:
+            print(f"[decode-and-store] Error in patient mapping: {e}")
             patient = None
         if patient:
             meta["patient"] = patient
 
         # ----------- Decode shimmer data -----------
+        print(f"[decode-and-store] Decoding shimmer data...")
         decoded = read_shimmer_dat(file_bytes)
+        print(f"[decode-and-store] Decoded keys: {list(decoded.keys())}")
 
         # ----------- Remove unwanted keys -----------
         EXCLUDE_KEYS = {
@@ -1065,16 +1073,28 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
                 large_data[k] = v
             else:
                 small_data[k] = v
+        print(f"[decode-and-store] Large data keys: {list(large_data.keys())}")
+        print(f"[decode-and-store] Small data keys: {list(small_data.keys())}")
 
-        # ----------- Store large data to S3 -----------
+        # ----------- Store large data to S3 using presigned URL -----------
         import json
         decode_key = f"decode/{os.path.splitext(full_file_name)[0]}_decoded.json"
-        s3_client.put_object(
-            Bucket=S3_BUCKET,
-            Key=decode_key,
-            Body=json.dumps(large_data),
-            ContentType="application/json"
+        presigned_url = s3_client.generate_presigned_url(
+            ClientMethod="put_object",
+            Params={"Bucket": S3_BUCKET, "Key": decode_key, "ContentType": "application/json"},
+            ExpiresIn=600
         )
+        print(f"[decode-and-store] Presigned URL for decoded upload: {presigned_url}")
+        try:
+            import requests
+            resp = requests.put(presigned_url, data=json.dumps(large_data), headers={"Content-Type": "application/json"})
+            print(f"[decode-and-store] S3 upload response status: {resp.status_code}")
+            if resp.status_code not in [200, 201]:
+                print(f"[decode-and-store] S3 upload error: {resp.text}")
+                return {"error": f"Failed to upload decoded file to S3: {resp.text}"}
+        except ImportError:
+            print("[decode-and-store] requests library is not installed.")
+            return {"error": "requests library is required for presigned URL upload. Please install it."}
 
         # ----------- Prepare DynamoDB record -----------
         def convert_floats(obj):
@@ -1102,15 +1122,19 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
             merged["recordedTimestamp"] = recorded_timestamp
         item = convert_floats(merged)
         item["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        print(f"[decode-and-store] DynamoDB item prepared: {item}")
 
         # ----------- Save to DynamoDB -----------
         file_table_name = os.getenv("DDB_FILE_TABLE")
         if not file_table_name:
+            print("[decode-and-store] DDB_FILE_TABLE env not set")
             return {"error": "DDB_FILE_TABLE env not set"}
         ddb = boto3.resource("dynamodb")
         file_table = ddb.Table(file_table_name)
         file_table.put_item(Item=item)
+        print(f"[decode-and-store] Item stored in DynamoDB table: {file_table_name}")
 
+        print(f"[decode-and-store] Returning success response.")
         return {
             "filename": full_file_name,
             "message": "Decode and store successful",
@@ -1119,6 +1143,7 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
         }
 
     except (BotoCoreError, ClientError, Exception) as e:
+        print(f"[decode-and-store] Exception: {e}")
         return {"error": str(e)}
 
 @app.get("/get-decoded-field-direct/")
