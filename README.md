@@ -1,8 +1,21 @@
+# Quick Links
+
+- [Key Features](#key-features)
+- [Flexible Time-Based Grouping](#flexible-time-based-grouping-for-shimmer-data)
+- [Calibration and Decoding Script](#calibration-and-decoding-script-improvements)
+- [API Endpoints](#key-endpoints)
+- [Setup](#setup)
+- [Architecture Overview](#architecture-overview)
+- [DynamoDB Size Limit Solution](#dynamodb-size-limit-solution)
+- [Project Structure](#project-structure)
+- [Contributing](#contributing)
+- [License](#license)
 # Shimmer Data Sync API
 
 RESTful API for managing and processing Shimmer wearable sensor data in the cloud. Handles file uploads to S3, decodes binary sensor streams with inertial calibration, stores metadata in DynamoDB, and provides endpoints for patient management and data retrieval.
 
-## Features
+
+## Key Features
 
 ### Data Management
 - Upload Shimmer sensor files (.txt) to S3
@@ -12,31 +25,46 @@ RESTful API for managing and processing Shimmer wearable sensor data in the clou
 - Generate presigned upload/download URLs
 
 ### Sensor Data Processing
-- **Binary sensor data decoding** (Shimmer3 format)
-  - 256-byte header containing device info, sample rate, enabled sensors, calibration parameters
+- Binary sensor data decoding (Shimmer3 format)
+  - 256-byte header: device info, sample rate, enabled sensors, calibration parameters
   - Variable-length data packets (3-byte timestamp + sensor channels)
-  
-- **Multi-channel support** with raw and calibrated data:
-  - **Accel_LN** (Low-Noise Accelerometer): X, Y, Z axes - high precision, lower range
-  - **Accel_WR** (Wide-Range Accelerometer): X, Y, Z axes - lower precision, higher range
-  - **Gyro** (Gyroscope): X, Y, Z axes - angular velocity
-  - **Mag** (Magnetometer): X, Y, Z axes - magnetic field
-  - Each channel provides both raw values and calibrated (_cal) values
-  
-- **Inertial sensor calibration**
-  - Offset correction (3 values per sensor)
-  - Gain scaling (3 values per sensor)
-  - Alignment matrix (3x3, values scaled by 100)
-  - Applied to all inertial sensors (Accel_LN, Accel_WR, Gyro, Mag)
-  
-- **Time synchronization** with phone RTC and rollover correction
+- Multi-channel support with raw and calibrated data:
+  - Accel_LN (Low-Noise Accelerometer): X, Y, Z axes
+  - Accel_WR (Wide-Range Accelerometer): X, Y, Z axes
+  - Gyro (Gyroscope): X, Y, Z axes
+  - Mag (Magnetometer): X, Y, Z axes
+  - Each channel provides both raw and calibrated (_cal) values
+- Inertial sensor calibration
+  - Offset correction, gain scaling, alignment matrix (applied to all inertial sensors)
+- Time synchronization with phone RTC and rollover correction
   - Initial RTC sync from phone timestamp (Unix epoch)
-  - Final output: Unix timestamps in `timestampCal` array
-  - Conversion to human-readable ISO 8601 format in `timestampReadable`
-  
-- **Computed metrics**:
+  - Output: Unix timestamps in `timestampCal`, ISO 8601 in `timestampReadable`
+- Computed metrics:
   - `Accel_WR_Absolute`: Magnitude (√(x² + y² + z²)) for each sample
-  - `Accel_WR_VAR`: Range (max - min) of absolute acceleration across recording
+  - `Accel_WR_VAR`: Range (max - min) of absolute acceleration
+    - UWB distance (`uwbDis`): Ultra-wideband distance readings (float, meters or device units)
+    - `uwbDis`: List of UWB distance readings per sample (if available)
+
+### Smart Storage
+- Full decoded data → S3 as JSON (handles 60k+ samples)
+- Summary metrics only → DynamoDB (stays under 400KB limit)
+- Scalable architecture for large sensor datasets
+
+### Flexible Time-Based Grouping for Shimmer Data
+- Decoded records are grouped by device and patient, then split into groups where all records are within a tunable time window (default: 15 seconds) of each other, regardless of date boundaries.
+- Each group is assigned a unique `group_id` (e.g., `group1`, `group2`, ...) based on the earliest timestamp in the group.
+- Shimmer assignment: Within each group, decoded data is assigned to `shimmer1_decoded` or `shimmer2_decoded` based on the device mapping from DynamoDB, not just by order or presence.
+- Single-shimmer groups: If only one shimmer is present in a group, it is still assigned to the correct field based on the mapping, and the other field is left empty.
+- This grouping approach ensures all records within a group are temporally close (within 15 seconds), supporting flexible analysis and robust downstream processing. Grouping is based on time proximity, not by calendar date.
+
+### Calibration and Decoding Script Improvements
+- The calibration and decoding script (`shimmerCalibrate.py`) is a direct Python port of the MATLAB function, with robust handling for:
+  - Binary decoding of Shimmer3 files, including dynamic channel parsing and custom 24-bit signed integer support.
+  - Inertial sensor calibration (offset, gain, alignment) for all axes and sensor types.
+  - Time calibration with rollover correction and smoothing, outputting both Unix and ISO 8601 timestamps.
+  - Output file naming now preserves the original base name for both `.mat` and `.json` files.
+  - All array math is implemented using standard Python (no NumPy required).
+  - Optional plotting and MATLAB file export if dependencies are available.
 
 ### Smart Storage
 - **Full decoded data** → S3 as JSON (handles 60k+ samples)
@@ -163,6 +191,12 @@ This keeps DynamoDB items small (~2-5 KB) while preserving full data access via 
 ├── test/                      # scripts to test the decoder code
 └── README.md
 ```
+
+- **Flexible Time-Based Grouping for Shimmer Data:**
+  - Decoded records are grouped by device and patient, and then split into groups where all records are within a tunable time window (default: 15 seconds) of each other, regardless of date boundaries.
+  - Each group is assigned a unique `group_id` (e.g., `group1`, `group2`, ...) based on the earliest timestamp in the group.
+  - This allows for robust handling of recordings that are close in time but not exactly synchronized, and supports both single- and dual-shimmer scenarios. Grouping is not strictly by date, but by temporal proximity.
+
 
 ## Contributing
 This project is part of the Shimmer UMass research platform. For access or collaboration, contact the Shimmer research team.
