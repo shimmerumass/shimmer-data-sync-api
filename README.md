@@ -56,6 +56,7 @@ RESTful API for managing and processing Shimmer wearable sensor data in the clou
 - Shimmer assignment: Within each group, decoded data is assigned to `shimmer1_decoded` or `shimmer2_decoded` based on the device mapping from DynamoDB, not just by order or presence.
 - Single-shimmer groups: If only one shimmer is present in a group, it is still assigned to the correct field based on the mapping, and the other field is left empty.
 - This grouping approach ensures all records within a group are temporally close (within 15 seconds), supporting flexible analysis and robust downstream processing. Grouping is based on time proximity, not by calendar date.
+- When combining files, shimmer assignment is always determined by looking up the device's mapping in DynamoDB (device-patient map). The system does not assign by order or filename, but uses the mapping to ensure each decoded record is placed in the correct field (`shimmer1_decoded` or `shimmer2_decoded`).
 
 ### Calibration and Decoding Script Improvements
 - The calibration and decoding script (`shimmerCalibrate.py`) is a direct Python port of the MATLAB function, with robust handling for:
