@@ -8,6 +8,9 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from typing import List, Optional, Dict
 from collections import defaultdict
+
+# Tunable grouping window for /files/combined-meta/ (seconds)
+GROUP_WINDOW_SECONDS = 15
 from dotenv import load_dotenv
 from mangum import Mangum
 from pydantic import BaseModel
@@ -927,12 +930,15 @@ def get_combined_meta():
         from collections import defaultdict
         grouped = defaultdict(lambda: {"shimmer1_decoded": [], "shimmer2_decoded": []})
 
+        # Group by (patient, device, date, within 15 sec)
+        # 1. Collect all records by (patient, device, date)
+        from collections import defaultdict
+        records_by_key = defaultdict(list)
         for item in items:
             device = item.get("device", "none")
             date = item.get("date", "none")
             shimmer_name = item.get("shimmer_device", "none")
             decode_s3_key = item.get("decode_s3_key", None)
-
             # Get patient
             patient = "none"
             if mapping_table and device != "none":
@@ -941,27 +947,50 @@ def get_combined_meta():
                     patient = resp.get("Item", {}).get("patient", "none")
                 except Exception:
                     pass
-
             # Remove unneeded heavy keys (just in case)
             EXCLUDE_KEYS = {"headerBytes", "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z",
                             "Gyro_X", "Gyro_Y", "Gyro_Z", "Mag_X", "Mag_Y", "Mag_Z"}
             record = {k: v for k, v in item.items() if k not in EXCLUDE_KEYS}
             record["decode_s3_key"] = decode_s3_key
+            record["shimmer_name"] = shimmer_name
+            record["patient"] = patient
+            # Parse timestamp as unix
+            recorded_ts = item.get("recordedTimestamp")
+            try:
+                ts_unix = None
+                if recorded_ts and isinstance(recorded_ts, str):
+                    ts_unix = datetime.fromisoformat(recorded_ts.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                ts_unix = None
+            record["_ts_unix"] = ts_unix
+            records_by_key[(patient, device, date)].append(record)
 
-            group_key = (device, patient, date)
-            group = grouped[group_key]
-            group["device"] = device
-            group["date"] = date
-            group["patient"] = patient
-
-            if not group.get("shimmer1"):
-                group["shimmer1"] = shimmer_name
-                group["shimmer1_decoded"].append(record)
-            elif shimmer_name == group.get("shimmer1"):
-                group["shimmer1_decoded"].append(record)
-            else:
-                group["shimmer2"] = shimmer_name
-                group["shimmer2_decoded"].append(record)
+        # 2. For each (patient, device, date), group by within GROUP_WINDOW_SECONDS
+        grouped = defaultdict(lambda: {"shimmer1_decoded": [], "shimmer2_decoded": []})
+        for key, recs in records_by_key.items():
+            # Sort by timestamp
+            recs = sorted([r for r in recs if r["_ts_unix"] is not None], key=lambda r: r["_ts_unix"])
+            group_id = 0
+            group_start = None
+            for rec in recs:
+                if group_start is None or rec["_ts_unix"] - group_start > GROUP_WINDOW_SECONDS:
+                    group_id += 1
+                    group_start = rec["_ts_unix"]
+                group_key = (*key, f"group{group_id}")
+                group = grouped[group_key]
+                group["device"] = key[1]
+                group["date"] = key[2]
+                group["patient"] = key[0]
+                group["group_id"] = f"group{group_id}"
+                shimmer_name = rec["shimmer_name"]
+                if not group.get("shimmer1"):
+                    group["shimmer1"] = shimmer_name
+                    group["shimmer1_decoded"].append(rec)
+                elif shimmer_name == group.get("shimmer1"):
+                    group["shimmer1_decoded"].append(rec)
+                else:
+                    group["shimmer2"] = shimmer_name
+                    group["shimmer2_decoded"].append(rec)
 
         result = list(grouped.values())
         return {"data": result, "error": None}
@@ -1054,7 +1083,7 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
         decoded = read_shimmer_dat(file_bytes)
         print(f"[decode-and-store] Decoded keys: {list(decoded.keys())}")
 
-        # ----------- Remove unwanted keys -----------
+        # ----------- Remove unneeded heavy keys (just in case)
         EXCLUDE_KEYS = {
             "timestamp", "headerInfo", "headerBytes", "sampleRate", "channelNames", "packetLengthBytes",
             "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14",
@@ -1107,15 +1136,12 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
                 return [convert_floats(v) for v in obj]
             return obj
 
-        # Extract recordedTimestamp from first timestampCal value and convert from Unix to ISO format
+        # Extract recordedTimestamp from first timestampCal value and convert from Unix to ISO format (no rounding)
         recorded_timestamp = None
         if "timestampCal" in decoded and isinstance(decoded["timestampCal"], list) and len(decoded["timestampCal"]) > 0:
             try:
                 unix_timestamp = float(decoded["timestampCal"][0])
-                # Round down to nearest 10 seconds
-                rounded_unix = unix_timestamp - (int(unix_timestamp) % 10) + (int(unix_timestamp) % 60 // 10) * 0
-                dt = datetime.fromtimestamp(rounded_unix, tz=timezone.utc)
-                dt = dt.replace(second=(dt.second // 10) * 10, microsecond=0)
+                dt = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc)
                 recorded_timestamp = dt.isoformat()
             except (ValueError, TypeError, OSError):
                 recorded_timestamp = None
