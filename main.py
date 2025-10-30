@@ -1112,8 +1112,11 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
         if "timestampCal" in decoded and isinstance(decoded["timestampCal"], list) and len(decoded["timestampCal"]) > 0:
             try:
                 unix_timestamp = float(decoded["timestampCal"][0])
-                # Convert Unix timestamp to ISO format
-                recorded_timestamp = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc).isoformat()
+                # Round down to nearest 10 seconds
+                rounded_unix = unix_timestamp - (int(unix_timestamp) % 10) + (int(unix_timestamp) % 60 // 10) * 0
+                dt = datetime.fromtimestamp(rounded_unix, tz=timezone.utc)
+                dt = dt.replace(second=(dt.second // 10) * 10, microsecond=0)
+                recorded_timestamp = dt.isoformat()
             except (ValueError, TypeError, OSError):
                 recorded_timestamp = None
 
