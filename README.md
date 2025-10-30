@@ -1,4 +1,8 @@
-# Quick Links
+# Shimmer Data Sync API
+
+RESTful API for managing and processing Shimmer wearable sensor data in the cloud. Handles file uploads to S3, decodes binary sensor streams with inertial calibration, stores metadata in DynamoDB, and provides endpoints for patient management and data retrieval.
+
+## Quick Links
 
 - [Key Features](#key-features)
 - [Flexible Time-Based Grouping](#flexible-time-based-grouping-for-shimmer-data)
@@ -10,9 +14,6 @@
 - [Project Structure](#project-structure)
 - [Contributing](#contributing)
 - [License](#license)
-# Shimmer Data Sync API
-
-RESTful API for managing and processing Shimmer wearable sensor data in the cloud. Handles file uploads to S3, decodes binary sensor streams with inertial calibration, stores metadata in DynamoDB, and provides endpoints for patient management and data retrieval.
 
 
 ## Key Features
