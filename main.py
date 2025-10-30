@@ -965,7 +965,24 @@ def get_combined_meta():
             record["_ts_unix"] = ts_unix
             records_by_key[(patient, device, date)].append(record)
 
-        # 2. For each (patient, device, date), group by within GROUP_WINDOW_SECONDS
+
+        # Build device->shimmer1/shimmer2 mapping for assignment
+        shimmer_map = {}
+        if mapping_table_name:
+            scan_kwargs = {"ProjectionExpression": "device, shimmer1, shimmer2"}
+            while True:
+                mresp = mapping_table.scan(**scan_kwargs)
+                for it in mresp.get("Items", []):
+                    dev = it.get("device")
+                    s1 = it.get("shimmer1")
+                    s2 = it.get("shimmer2")
+                    if dev:
+                        shimmer_map[dev] = {"shimmer1": s1, "shimmer2": s2}
+                if "LastEvaluatedKey" in mresp:
+                    scan_kwargs["ExclusiveStartKey"] = mresp["LastEvaluatedKey"]
+                else:
+                    break
+
         grouped = defaultdict(lambda: {"shimmer1_decoded": [], "shimmer2_decoded": []})
         for key, recs in records_by_key.items():
             # Sort by timestamp
@@ -983,14 +1000,27 @@ def get_combined_meta():
                 group["patient"] = key[0]
                 group["group_id"] = f"group{group_id}"
                 shimmer_name = rec["shimmer_name"]
-                if not group.get("shimmer1"):
-                    group["shimmer1"] = shimmer_name
+                # Use mapping to assign to shimmer1 or shimmer2
+                device = key[1]
+                mapping = shimmer_map.get(device, {})
+                s1 = mapping.get("shimmer1")
+                s2 = mapping.get("shimmer2")
+                if s1 and shimmer_name == s1:
+                    group["shimmer1"] = s1
                     group["shimmer1_decoded"].append(rec)
-                elif shimmer_name == group.get("shimmer1"):
-                    group["shimmer1_decoded"].append(rec)
-                else:
-                    group["shimmer2"] = shimmer_name
+                elif s2 and shimmer_name == s2:
+                    group["shimmer2"] = s2
                     group["shimmer2_decoded"].append(rec)
+                else:
+                    # If mapping missing or doesn't match, assign to shimmer1 by default
+                    if not group.get("shimmer1"):
+                        group["shimmer1"] = shimmer_name
+                        group["shimmer1_decoded"].append(rec)
+                    elif shimmer_name == group.get("shimmer1"):
+                        group["shimmer1_decoded"].append(rec)
+                    else:
+                        group["shimmer2"] = shimmer_name
+                        group["shimmer2_decoded"].append(rec)
 
         result = list(grouped.values())
         return {"data": result, "error": None}
