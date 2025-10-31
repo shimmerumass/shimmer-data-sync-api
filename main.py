@@ -904,6 +904,7 @@ def get_combined_meta():
     Combines decoded file metadata from DynamoDB with patient mapping.
     Each record includes S3 pointer ('decode_s3_key') to full decoded arrays.
     Excludes heavy fields like headerBytes and raw sensor channels.
+    STRICTLY enforces one record per shimmer per group (max 2 records per group).
     """
     try:
         # ----------- Load decoded metadata -----------
@@ -928,11 +929,9 @@ def get_combined_meta():
         mapping_table = ddb.Table(mapping_table_name) if mapping_table_name else None
 
         from collections import defaultdict
-        grouped = defaultdict(lambda: {"shimmer1_decoded": [], "shimmer2_decoded": []})
-
+        
         # Group by (patient, device, date, within 15 sec)
         # 1. Collect all records by (patient, device, date)
-        from collections import defaultdict
         records_by_key = defaultdict(list)
         for item in items:
             device = item.get("device", "none")
@@ -965,7 +964,6 @@ def get_combined_meta():
             record["_ts_unix"] = ts_unix
             records_by_key[(patient, device, date)].append(record)
 
-
         # Build device->shimmer1/shimmer2 mapping for assignment
         shimmer_map = {}
         if mapping_table_name:
@@ -984,42 +982,57 @@ def get_combined_meta():
                     break
 
         grouped = defaultdict(lambda: {"shimmer1_decoded": [], "shimmer2_decoded": []})
+        
         for key, recs in records_by_key.items():
             # Sort by timestamp
             recs = sorted([r for r in recs if r["_ts_unix"] is not None], key=lambda r: r["_ts_unix"])
+            
             group_id = 0
             prev_ts = None
+            group_shimmer_count = {}  # Track how many of each shimmer type in current group
+            
             for rec in recs:
-                if prev_ts is None or rec["_ts_unix"] - prev_ts > GROUP_WINDOW_SECONDS:
+                shimmer_name = rec["shimmer_name"]
+                device = key[1]
+                mapping = shimmer_map.get(device, {})
+                s1 = mapping.get("shimmer1")
+                s2 = mapping.get("shimmer2")
+                
+                # Determine shimmer type (1 or 2)
+                shimmer_type = None
+                if s1 and shimmer_name == s1:
+                    shimmer_type = "shimmer1"
+                elif s2 and shimmer_name == s2:
+                    shimmer_type = "shimmer2"
+                else:
+                    # Fallback logic
+                    shimmer_type = "shimmer1" if shimmer_name == s1 else "shimmer2"
+                
+                # Check if we need a new group
+                # Start new group if: no prev_ts, gap > 15s, OR current shimmer type already exists in group
+                if (prev_ts is None or 
+                    rec["_ts_unix"] - prev_ts > GROUP_WINDOW_SECONDS or
+                    group_shimmer_count.get(shimmer_type, 0) > 0):
                     group_id += 1
+                    group_shimmer_count = {}  # Reset counter for new group
+                
                 group_key = (*key, f"group{group_id}")
                 group = grouped[group_key]
                 group["device"] = key[1]
                 group["date"] = key[2]
                 group["patient"] = key[0]
                 group["group_id"] = f"group{group_id}"
-                shimmer_name = rec["shimmer_name"]
-                # Use mapping to assign to shimmer1 or shimmer2
-                device = key[1]
-                mapping = shimmer_map.get(device, {})
-                s1 = mapping.get("shimmer1")
-                s2 = mapping.get("shimmer2")
-                if s1 and shimmer_name == s1:
-                    group["shimmer1"] = s1
+                
+                # Add to appropriate shimmer list
+                if shimmer_type == "shimmer1":
+                    group["shimmer1"] = shimmer_name
                     group["shimmer1_decoded"].append(rec)
-                elif s2 and shimmer_name == s2:
-                    group["shimmer2"] = s2
-                    group["shimmer2_decoded"].append(rec)
                 else:
-                    # If mapping missing or doesn't match, assign to shimmer1 by default
-                    if not group.get("shimmer1"):
-                        group["shimmer1"] = shimmer_name
-                        group["shimmer1_decoded"].append(rec)
-                    elif shimmer_name == group.get("shimmer1"):
-                        group["shimmer1_decoded"].append(rec)
-                    else:
-                        group["shimmer2"] = shimmer_name
-                        group["shimmer2_decoded"].append(rec)
+                    group["shimmer2"] = shimmer_name
+                    group["shimmer2_decoded"].append(rec)
+                
+                # Update counters
+                group_shimmer_count[shimmer_type] = group_shimmer_count.get(shimmer_type, 0) + 1
                 prev_ts = rec["_ts_unix"]
 
         result = list(grouped.values())
@@ -1027,8 +1040,6 @@ def get_combined_meta():
 
     except Exception as e:
         return {"data": [], "error": str(e)}
-
-
 
 # Place this endpoint after app = FastAPI() initialization
 
