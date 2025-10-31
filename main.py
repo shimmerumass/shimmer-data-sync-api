@@ -988,11 +988,10 @@ def get_combined_meta():
             # Sort by timestamp
             recs = sorted([r for r in recs if r["_ts_unix"] is not None], key=lambda r: r["_ts_unix"])
             group_id = 0
-            group_start = None
+            prev_ts = None
             for rec in recs:
-                if group_start is None or rec["_ts_unix"] - group_start > GROUP_WINDOW_SECONDS:
+                if prev_ts is None or rec["_ts_unix"] - prev_ts > GROUP_WINDOW_SECONDS:
                     group_id += 1
-                    group_start = rec["_ts_unix"]
                 group_key = (*key, f"group{group_id}")
                 group = grouped[group_key]
                 group["device"] = key[1]
@@ -1021,6 +1020,7 @@ def get_combined_meta():
                     else:
                         group["shimmer2"] = shimmer_name
                         group["shimmer2_decoded"].append(rec)
+                prev_ts = rec["_ts_unix"]
 
         result = list(grouped.values())
         return {"data": result, "error": None}
