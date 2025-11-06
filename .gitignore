@@ -5,3 +5,7 @@ lambda_package/*
 
 main.py
 lambda-deploy.zip
+lambda_lib/*
+test_files/data/*
+accel_plot.png
+.DS_Store
