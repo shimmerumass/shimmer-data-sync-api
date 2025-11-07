@@ -9,3 +9,4 @@ lambda_lib/*
 test_files/data/*
 accel_plot.png
 .DS_Store
+comparison_plots_E169/*
