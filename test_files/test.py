@@ -363,7 +363,11 @@ if __name__ == '__main__':
     import json
     
     # Use the actual test file
-    fname = 'a9ae0f999916e210__20250925_232338__TEST0916_1752967227__Shimmer_DDD6-000__000.txt'
+    fname = 'test_files/data/realActions/DC95_left.txt'
+    
+    # Extract base filename for output files (without path and extension)
+    import os
+    base_name = os.path.splitext(os.path.basename(fname))[0]  # e.g., 'E169_right'
     
     try:
         result = read_shimmer_data_file_as_txt(fname)
@@ -373,20 +377,92 @@ if __name__ == '__main__':
         print(f"Sample rate: {result.get('sampleRate', 'N/A')} Hz")
         print(f"Available channels: {len([k for k in result.keys() if isinstance(result[k], list) and k != 'headerBytes'])}")
         
-        # Save full output
+        # Save full output with all channels (flat structure, no root level)
+        all_channels_flat = {}
+        
+        # Include all sensor data (both raw and calibrated)
+        for key, value in result.items():
+            if key == 'timestampReadable':
+                continue  # Skip for JSON compatibility
+            elif key == 'headerBytes':
+                continue  # Skip raw header bytes for cleaner output
+            elif key == 'channelInfo':
+                # Convert channelInfo to a more readable format
+                all_channels_flat['channelNames'] = [ch['name'] for ch in value]
+                all_channels_flat['channelCount'] = len(value)
+            else:
+                all_channels_flat[key] = value
+        
+        # Add summary statistics for key channels
+        if 'Accel_WR_X_cal' in result and 'Accel_WR_Y_cal' in result and 'Accel_WR_Z_cal' in result:
+            x_cal = result['Accel_WR_X_cal']
+            y_cal = result['Accel_WR_Y_cal'] 
+            z_cal = result['Accel_WR_Z_cal']
+            all_channels_flat['Accel_WR_Stats'] = {
+                'mean_x': sum(x_cal) / len(x_cal),
+                'mean_y': sum(y_cal) / len(y_cal),
+                'mean_z': sum(z_cal) / len(z_cal),
+                'samples': len(x_cal)
+            }
+        
+        # Save to root directory
         with open('output.json', 'w') as f:
-            json.dump(result, f, indent=2)
-        print("✅ Full data saved to output.json")
+            json.dump(all_channels_flat, f, indent=2)
+        print("✅ All channels saved to output.json (flat structure)")
         
         # Save accelerometer data only
         accel_only = {}
-        for key in ['Accel_WR_X_cal', 'Accel_WR_Y_cal', 'Accel_WR_Z_cal', 'Accel_WR_Absolute', 'Accel_WR_VAR', 'timestampCal', 'timestampReadable']:
+        for key in ['Accel_WR_X_cal', 'Accel_WR_Y_cal', 'Accel_WR_Z_cal', 'Accel_WR_Absolute', 'Accel_WR_VAR', 'timestampCal']:
             if key in result:
                 accel_only[key] = result[key]
         
         with open('accel_output.json', 'w') as f:
             json.dump(accel_only, f, indent=2)
         print("✅ Accelerometer data saved to accel_output.json")
+        
+        # Also save JSON files in test_files/data/realActions folder
+        import os
+        os.makedirs('test_files/data/realActions', exist_ok=True)
+        
+        # Use base_name for all output files
+        all_channels_json = f'test_files/data/realActions/{base_name}-AllChannels.json'
+        accel_only_json = f'test_files/data/realActions/{base_name}-AccelOnly.json'
+        
+        with open(all_channels_json, 'w') as f:
+            json.dump(all_channels_flat, f, indent=2)
+        print(f"✅ All channels saved to {all_channels_json}")
+        
+        with open(accel_only_json, 'w') as f:
+            json.dump(accel_only, f, indent=2)
+        print(f"✅ Accelerometer data saved to {accel_only_json}")
+        
+        # Save as MAT file with leftSensorData structure
+        if savemat is not None:
+            # Create a copy without non-MAT-compatible fields
+            mat_data = {}
+            for key, value in result.items():
+                if key in ['timestampReadable']:  # Skip string arrays that might cause issues
+                    continue
+                if isinstance(value, list):
+                    # Convert Python lists to proper format for MATLAB
+                    if value and isinstance(value[0], (int, float)):
+                        mat_data[key] = value
+                    elif value and isinstance(value[0], dict):
+                        continue  # Skip complex nested structures
+                    else:
+                        mat_data[key] = value
+                else:
+                    mat_data[key] = value
+            
+            # Wrap everything under leftSensorData
+            mat_output = {'rightSensorData': mat_data}
+            
+            # Use base_name for MAT file too
+            mat_filepath = f'test_files/data/realActions/{base_name}-Decoded.mat'
+            savemat(mat_filepath, mat_output)
+            print(f"✅ MAT file saved to {mat_filepath} with leftSensorData structure")
+        else:
+            print("⚠️ scipy not available - skipping MAT file save")
         
         # Print some stats
         if 'Accel_WR_Absolute' in result:
