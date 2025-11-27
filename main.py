@@ -1089,6 +1089,7 @@ def get_combined_meta():
             device = item.get("device", "none")
             shimmer_name = item.get("shimmer_device", "none")
             decode_s3_key = item.get("decode_s3_key", None)
+            date = item.get("date", "none")
 
             # Get patient
             patient = "none"
@@ -1109,6 +1110,7 @@ def get_combined_meta():
             record["decode_s3_key"] = decode_s3_key
             record["shimmer_name"] = shimmer_name
             record["patient"] = patient
+            record["date"] = date
 
             # Parse timestamp as UNIX
             recorded_ts = item.get("recordedTimestamp")
@@ -1180,6 +1182,7 @@ def get_combined_meta():
                     group_id += 1
                     curr_group = {
                         "patient": patient,
+                        "date": date,
                         "device": device,
                         "group_id": f"group{group_id}",
                         "shimmer1": None,
@@ -1207,6 +1210,7 @@ def get_combined_meta():
                         curr_group = {
                             "patient": patient,
                             "device": device,
+                            "date": date,
                             "group_id": f"group{group_id}",
                             "shimmer1": None,
                             "shimmer2": None,
