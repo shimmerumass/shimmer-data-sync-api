@@ -8,6 +8,11 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from typing import List, Optional, Dict
 from collections import defaultdict
+import json
+import traceback
+
+
+
 
 # Tunable grouping window for /files/combined-meta/ (seconds)
 GROUP_WINDOW_SECONDS = 15
@@ -831,7 +836,7 @@ def get_deconstructed_files():
     """
     Returns a list of all files in S3 with their parsed components as individual JSON records.
     Each file is returned as a separate record with all its parsed fields.
-    Skips .zip files.
+    Skips .zip files and files in the decode folder.
     """
     try:
         response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
@@ -886,8 +891,8 @@ def get_deconstructed_files():
         result = []
         for obj in contents:
             key = obj["Key"]
-            # Skip .zip files
-            if key.lower().endswith('.zip'):
+            # Skip .zip files and files in the decode folder
+            if key.lower().endswith('.zip') or key.startswith("decode/"):
                 continue
             parsed = parse_custom_filename(key)
             result.append(parsed)
@@ -898,13 +903,157 @@ def get_deconstructed_files():
         return {"data": [], "error": str(e)}
 
 
+# @app.get("/files/combined-meta/")
+# def get_combined_meta():
+#     """
+#     Combines decoded file metadata from DynamoDB with patient mapping.
+#     Each record includes S3 pointer ('decode_s3_key') to full decoded arrays.
+#     Excludes heavy fields like headerBytes and raw sensor channels.
+#     STRICTLY enforces one record per shimmer per group (max 2 records per group).
+#     """
+#     try:
+#         # ----------- Load decoded metadata -----------
+#         file_table_name = os.getenv("DDB_FILE_TABLE")
+#         if not file_table_name:
+#             return {"data": [], "error": "DDB_FILE_TABLE env not set"}
+
+#         ddb = boto3.resource("dynamodb")
+#         file_table = ddb.Table(file_table_name)
+#         items = []
+#         scan_kwargs = {}
+#         while True:
+#             resp = file_table.scan(**scan_kwargs)
+#             items.extend(resp.get("Items", []))
+#             if "LastEvaluatedKey" in resp:
+#                 scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+#             else:
+#                 break
+
+#         # ----------- Load patient mapping -----------
+#         mapping_table_name = os.getenv("DDB_TABLE")
+#         mapping_table = ddb.Table(mapping_table_name) if mapping_table_name else None
+
+#         from collections import defaultdict
+        
+#         # Group by (patient, device, date, within 15 sec)
+#         # 1. Collect all records by (patient, device, date)
+#         records_by_key = defaultdict(list)
+#         for item in items:
+#             device = item.get("device", "none")
+#             date = item.get("date", "none")
+#             shimmer_name = item.get("shimmer_device", "none")
+#             decode_s3_key = item.get("decode_s3_key", None)
+#             # Get patient
+#             patient = "none"
+#             if mapping_table and device != "none":
+#                 try:
+#                     resp = mapping_table.get_item(Key={"device": device})
+#                     patient = resp.get("Item", {}).get("patient", "none")
+#                 except Exception:
+#                     pass
+#             # Remove unneeded heavy keys (just in case)
+#             EXCLUDE_KEYS = {"headerBytes", "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z",
+#                             "Gyro_X", "Gyro_Y", "Gyro_Z", "Mag_X", "Mag_Y", "Mag_Z"}
+#             record = {k: v for k, v in item.items() if k not in EXCLUDE_KEYS}
+#             record["decode_s3_key"] = decode_s3_key
+#             record["shimmer_name"] = shimmer_name
+#             record["patient"] = patient
+#             # Parse timestamp as unix
+#             recorded_ts = item.get("recordedTimestamp")
+#             try:
+#                 ts_unix = None
+#                 if recorded_ts and isinstance(recorded_ts, str):
+#                     ts_unix = datetime.fromisoformat(recorded_ts.replace("Z", "+00:00")).timestamp()
+#             except Exception:
+#                 ts_unix = None
+#             record["_ts_unix"] = ts_unix
+#             records_by_key[(patient, device, date)].append(record)
+
+#         # Build device->shimmer1/shimmer2 mapping for assignment
+#         shimmer_map = {}
+#         if mapping_table_name:
+#             scan_kwargs = {"ProjectionExpression": "device, shimmer1, shimmer2"}
+#             while True:
+#                 mresp = mapping_table.scan(**scan_kwargs)
+#                 for it in mresp.get("Items", []):
+#                     dev = it.get("device")
+#                     s1 = it.get("shimmer1")
+#                     s2 = it.get("shimmer2")
+#                     if dev:
+#                         shimmer_map[dev] = {"shimmer1": s1, "shimmer2": s2}
+#                 if "LastEvaluatedKey" in mresp:
+#                     scan_kwargs["ExclusiveStartKey"] = mresp["LastEvaluatedKey"]
+#                 else:
+#                     break
+
+#         grouped = defaultdict(lambda: {"shimmer1_decoded": [], "shimmer2_decoded": []})
+        
+#         for key, recs in records_by_key.items():
+#             # Sort by timestamp
+#             recs = sorted([r for r in recs if r["_ts_unix"] is not None], key=lambda r: r["_ts_unix"])
+            
+#             group_id = 0
+#             prev_ts = None
+#             group_shimmer_count = {}  # Track how many of each shimmer type in current group
+            
+#             for rec in recs:
+#                 shimmer_name = rec["shimmer_name"]
+#                 device = key[1]
+#                 mapping = shimmer_map.get(device, {})
+#                 s1 = mapping.get("shimmer1")
+#                 s2 = mapping.get("shimmer2")
+                
+#                 # Determine shimmer type (1 or 2)
+#                 shimmer_type = None
+#                 if s1 and shimmer_name == s1:
+#                     shimmer_type = "shimmer1"
+#                 elif s2 and shimmer_name == s2:
+#                     shimmer_type = "shimmer2"
+#                 else:
+#                     # Fallback logic
+#                     shimmer_type = "shimmer1" if shimmer_name == s1 else "shimmer2"
+                
+#                 # Check if we need a new group
+#                 # Start new group if: no prev_ts, gap > 15s, OR current shimmer type already exists in group
+#                 if (prev_ts is None or 
+#                     rec["_ts_unix"] - prev_ts > GROUP_WINDOW_SECONDS or
+#                     group_shimmer_count.get(shimmer_type, 0) > 0):
+#                     group_id += 1
+#                     group_shimmer_count = {}  # Reset counter for new group
+                
+#                 group_key = (*key, f"group{group_id}")
+#                 group = grouped[group_key]
+#                 group["device"] = key[1]
+#                 group["date"] = key[2]
+#                 group["patient"] = key[0]
+#                 group["group_id"] = f"group{group_id}"
+                
+#                 # Add to appropriate shimmer list
+#                 if shimmer_type == "shimmer1":
+#                     group["shimmer1"] = shimmer_name
+#                     group["shimmer1_decoded"].append(rec)
+#                 else:
+#                     group["shimmer2"] = shimmer_name
+#                     group["shimmer2_decoded"].append(rec)
+                
+#                 # Update counters
+#                 group_shimmer_count[shimmer_type] = group_shimmer_count.get(shimmer_type, 0) + 1
+#                 prev_ts = rec["_ts_unix"]
+
+#         result = list(grouped.values())
+#         return {"data": result, "error": None}
+
+#     except Exception as e:
+#         return {"data": [], "error": str(e)}
+
 @app.get("/files/combined-meta/")
 def get_combined_meta():
     """
     Combines decoded file metadata from DynamoDB with patient mapping.
     Each record includes S3 pointer ('decode_s3_key') to full decoded arrays.
-    Excludes heavy fields like headerBytes and raw sensor channels.
     STRICTLY enforces one record per shimmer per group (max 2 records per group).
+    Uses recordedTimestamp for grouping (NOT filename date).  # modified
+    Cross-day grouping supported (23:59 -> 00:00).             # modified
     """
     try:
         # ----------- Load decoded metadata -----------
@@ -914,6 +1063,7 @@ def get_combined_meta():
 
         ddb = boto3.resource("dynamodb")
         file_table = ddb.Table(file_table_name)
+
         items = []
         scan_kwargs = {}
         while True:
@@ -929,15 +1079,17 @@ def get_combined_meta():
         mapping_table = ddb.Table(mapping_table_name) if mapping_table_name else None
 
         from collections import defaultdict
-        
-        # Group by (patient, device, date, within 15 sec)
-        # 1. Collect all records by (patient, device, date)
+
+        GROUP_WINDOW_SECONDS = 15
+
+        # ====== CHANGED: group by ONLY (patient, device) NOT date ====== # modified
         records_by_key = defaultdict(list)
+
         for item in items:
             device = item.get("device", "none")
-            date = item.get("date", "none")
             shimmer_name = item.get("shimmer_device", "none")
             decode_s3_key = item.get("decode_s3_key", None)
+
             # Get patient
             patient = "none"
             if mapping_table and device != "none":
@@ -946,25 +1098,35 @@ def get_combined_meta():
                     patient = resp.get("Item", {}).get("patient", "none")
                 except Exception:
                     pass
-            # Remove unneeded heavy keys (just in case)
-            EXCLUDE_KEYS = {"headerBytes", "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z",
-                            "Gyro_X", "Gyro_Y", "Gyro_Z", "Mag_X", "Mag_Y", "Mag_Z"}
+
+            # Remove heavy fields
+            EXCLUDE_KEYS = {
+                "headerBytes", "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z",
+                "Gyro_X", "Gyro_Y", "Gyro_Z", "Mag_X", "Mag_Y", "Mag_Z"
+            }
             record = {k: v for k, v in item.items() if k not in EXCLUDE_KEYS}
+
             record["decode_s3_key"] = decode_s3_key
             record["shimmer_name"] = shimmer_name
             record["patient"] = patient
-            # Parse timestamp as unix
+
+            # Parse timestamp as UNIX
             recorded_ts = item.get("recordedTimestamp")
             try:
                 ts_unix = None
                 if recorded_ts and isinstance(recorded_ts, str):
-                    ts_unix = datetime.fromisoformat(recorded_ts.replace("Z", "+00:00")).timestamp()
+                    ts_unix = datetime.fromisoformat(
+                        recorded_ts.replace("Z", "+00:00")
+                    ).timestamp()
             except Exception:
                 ts_unix = None
-            record["_ts_unix"] = ts_unix
-            records_by_key[(patient, device, date)].append(record)
 
-        # Build device->shimmer1/shimmer2 mapping for assignment
+            record["_ts_unix"] = ts_unix
+
+            # ====== CHANGED: group ONLY by (patient, device) ====== # modified
+            records_by_key[(patient, device)].append(record)
+
+        # ----------- Build shimmer assignment map -----------
         shimmer_map = {}
         if mapping_table_name:
             scan_kwargs = {"ProjectionExpression": "device, shimmer1, shimmer2"}
@@ -972,74 +1134,109 @@ def get_combined_meta():
                 mresp = mapping_table.scan(**scan_kwargs)
                 for it in mresp.get("Items", []):
                     dev = it.get("device")
-                    s1 = it.get("shimmer1")
-                    s2 = it.get("shimmer2")
                     if dev:
-                        shimmer_map[dev] = {"shimmer1": s1, "shimmer2": s2}
+                        shimmer_map[dev] = {
+                            "shimmer1": it.get("shimmer1"),
+                            "shimmer2": it.get("shimmer2"),
+                        }
                 if "LastEvaluatedKey" in mresp:
                     scan_kwargs["ExclusiveStartKey"] = mresp["LastEvaluatedKey"]
                 else:
                     break
 
-        grouped = defaultdict(lambda: {"shimmer1_decoded": [], "shimmer2_decoded": []})
-        
-        for key, recs in records_by_key.items():
+        # ----------- Final grouping -----------
+
+        grouped = []
+
+        for (patient, device), recs in records_by_key.items():
+
             # Sort by timestamp
-            recs = sorted([r for r in recs if r["_ts_unix"] is not None], key=lambda r: r["_ts_unix"])
-            
+            recs = sorted(
+                [r for r in recs if r["_ts_unix"] is not None],
+                key=lambda r: r["_ts_unix"]
+            )
+
+            mapping = shimmer_map.get(device, {})
+            s1 = mapping.get("shimmer1")
+            s2 = mapping.get("shimmer2")
+
+            curr_group = None
             group_id = 0
-            prev_ts = None
-            group_shimmer_count = {}  # Track how many of each shimmer type in current group
-            
+
             for rec in recs:
                 shimmer_name = rec["shimmer_name"]
-                device = key[1]
-                mapping = shimmer_map.get(device, {})
-                s1 = mapping.get("shimmer1")
-                s2 = mapping.get("shimmer2")
-                
-                # Determine shimmer type (1 or 2)
-                shimmer_type = None
-                if s1 and shimmer_name == s1:
+
+                # Identify shimmer type
+                if shimmer_name == s1:
                     shimmer_type = "shimmer1"
-                elif s2 and shimmer_name == s2:
+                elif shimmer_name == s2:
                     shimmer_type = "shimmer2"
                 else:
-                    # Fallback logic
-                    shimmer_type = "shimmer1" if shimmer_name == s1 else "shimmer2"
-                
-                # Check if we need a new group
-                # Start new group if: no prev_ts, gap > 15s, OR current shimmer type already exists in group
-                if (prev_ts is None or 
-                    rec["_ts_unix"] - prev_ts > GROUP_WINDOW_SECONDS or
-                    group_shimmer_count.get(shimmer_type, 0) > 0):
-                    group_id += 1
-                    group_shimmer_count = {}  # Reset counter for new group
-                
-                group_key = (*key, f"group{group_id}")
-                group = grouped[group_key]
-                group["device"] = key[1]
-                group["date"] = key[2]
-                group["patient"] = key[0]
-                group["group_id"] = f"group{group_id}"
-                
-                # Add to appropriate shimmer list
-                if shimmer_type == "shimmer1":
-                    group["shimmer1"] = shimmer_name
-                    group["shimmer1_decoded"].append(rec)
-                else:
-                    group["shimmer2"] = shimmer_name
-                    group["shimmer2_decoded"].append(rec)
-                
-                # Update counters
-                group_shimmer_count[shimmer_type] = group_shimmer_count.get(shimmer_type, 0) + 1
-                prev_ts = rec["_ts_unix"]
+                    # fallback
+                    shimmer_type = "shimmer1"
 
-        result = list(grouped.values())
-        return {"data": result, "error": None}
+                # Decide new group or same group
+                if curr_group is None:
+                    group_id += 1
+                    curr_group = {
+                        "patient": patient,
+                        "device": device,
+                        "group_id": f"group{group_id}",
+                        "shimmer1": None,
+                        "shimmer2": None,
+                        "shimmer1_decoded": [],
+                        "shimmer2_decoded": [],
+                    }
+                    curr_group["_last_ts"] = rec["_ts_unix"]  # modified
+
+                else:
+                    # Time difference check (supports cross-day) # modified
+                    time_ok = abs(rec["_ts_unix"] - curr_group["_last_ts"]) <= GROUP_WINDOW_SECONDS
+
+                    # Check if shimmer slot already taken
+                    shimmer_slot_free = (
+                        shimmer_type == "shimmer1" and not curr_group["shimmer1"]
+                    ) or (
+                        shimmer_type == "shimmer2" and not curr_group["shimmer2"]
+                    )
+
+                    # Conditions requiring a new group
+                    if not time_ok or not shimmer_slot_free:
+                        grouped.append(curr_group)
+                        group_id += 1
+                        curr_group = {
+                            "patient": patient,
+                            "device": device,
+                            "group_id": f"group{group_id}",
+                            "shimmer1": None,
+                            "shimmer2": None,
+                            "shimmer1_decoded": [],
+                            "shimmer2_decoded": [],
+                        }
+
+                # Add to group
+                if shimmer_type == "shimmer1":
+                    curr_group["shimmer1"] = shimmer_name
+                    curr_group["shimmer1_decoded"].append(rec)
+                else:
+                    curr_group["shimmer2"] = shimmer_name
+                    curr_group["shimmer2_decoded"].append(rec)
+
+                curr_group["_last_ts"] = rec["_ts_unix"]
+
+            # Append last group
+            if curr_group:
+                grouped.append(curr_group)
+
+        # Remove helper keys
+        for g in grouped:
+            g.pop("_last_ts", None)
+
+        return {"data": grouped, "error": None}
 
     except Exception as e:
         return {"data": [], "error": str(e)}
+
 
 # Place this endpoint after app = FastAPI() initialization
 
@@ -1126,8 +1323,8 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
 
         # ----------- Remove unneeded heavy keys (just in case)
         EXCLUDE_KEYS = {
-            "timestamp", "headerInfo", "headerBytes", "sampleRate", "channelNames", "packetLengthBytes",
-            "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", "INT_A13", "INT_A14",
+            "timestamp", "headerInfo", "headerBytes", "channelNames", "packetLengthBytes",
+            "Accel_LN_X", "Accel_LN_Y", "Accel_LN_Z", "VSenseBatt", 
             "Gyro_X", "Gyro_Y", "Gyro_Z",
             "Accel_WR_X", "Accel_WR_Y", "Accel_WR_Z",
             "Mag_X", "Mag_Y", "Mag_Z",
@@ -1143,6 +1340,16 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
                 large_data[k] = v
             else:
                 small_data[k] = v
+
+        # Always include sampleRate in both small_data and large_data
+        if "sampleRate" in decoded:
+            try:
+                sr = round(float(decoded["sampleRate"]), 2)
+                small_data["sampleRate"] = sr
+                large_data["sampleRate"] = sr
+            except Exception:
+                pass
+
         print(f"[decode-and-store] Large data keys: {list(large_data.keys())}")
         print(f"[decode-and-store] Small data keys: {list(small_data.keys())}")
 
@@ -1157,7 +1364,11 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
         print(f"[decode-and-store] Presigned URL for decoded upload: {presigned_url}")
         try:
             import requests
-            resp = requests.put(presigned_url, data=json.dumps(large_data), headers={"Content-Type": "application/json"})
+            resp = requests.put(
+                presigned_url,
+                data=json.dumps(large_data),
+                headers={"Content-Type": "application/json"}
+            )
             print(f"[decode-and-store] S3 upload response status: {resp.status_code}")
             if resp.status_code not in [200, 201]:
                 print(f"[decode-and-store] S3 upload error: {resp.text}")
@@ -1177,7 +1388,7 @@ def decode_and_store(full_file_name: str = Body(..., embed=True)):
                 return [convert_floats(v) for v in obj]
             return obj
 
-        # Extract recordedTimestamp from first timestampCal value and convert from Unix to ISO format (no rounding)
+        # Extract recordedTimestamp from first timestampCal value
         recorded_timestamp = None
         if "timestampCal" in decoded and isinstance(decoded["timestampCal"], list) and len(decoded["timestampCal"]) > 0:
             try:
@@ -1240,3 +1451,4 @@ def get_decoded_field_direct(
         }
     except (BotoCoreError, ClientError, Exception) as e:
         raise HTTPException(status_code=500, detail=str(e))
+
