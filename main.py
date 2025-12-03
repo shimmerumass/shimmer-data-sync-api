@@ -320,6 +320,29 @@ def get_files_metadata() -> Dict[str, Any]:
             else:
                 break
 
+        # Load recordedTimestamp from DynamoDB file table (for decoded files)
+        file_metadata: Dict[str, Dict[str, Any]] = {}
+        file_table_name = os.getenv("DDB_FILE_TABLE")
+        if file_table_name:
+            try:
+                ddb = boto3.resource("dynamodb")
+                file_table = ddb.Table(file_table_name)
+                scan_kwargs = {"ProjectionExpression": "full_file_name, recordedTimestamp"}
+                while True:
+                    fresp = file_table.scan(**scan_kwargs)
+                    for it in fresp.get("Items", []):
+                        fname = it.get("full_file_name")
+                        recorded_ts = it.get("recordedTimestamp")
+                        if fname:
+                            file_metadata[fname] = {"recordedTimestamp": recorded_ts}
+                    if "LastEvaluatedKey" in fresp:
+                        scan_kwargs["ExclusiveStartKey"] = fresp["LastEvaluatedKey"]
+                    else:
+                        break
+            except Exception as e:
+                # If file table doesn't exist or error, continue without recordedTimestamp
+                pass
+
         from collections import defaultdict
         # Group by (device, date)
         def parse_custom_filename(fname):
@@ -367,15 +390,32 @@ def get_files_metadata() -> Dict[str, Any]:
         for k in keys:
             meta = parse_custom_filename(os.path.basename(k))
             device = meta["device"]
-            date = meta["date"]
+            date = meta["date"]  # Fallback date from filename
+            time = meta["time"]  # Fallback time from filename
             experiment_name = meta["experiment_name"]
             shimmer_device = meta["shimmer_device"]
             timestamp = meta["timestamp"]
             pat = mapping.get(device)
+            
+            # Get recordedTimestamp from DynamoDB if available
+            file_meta = file_metadata.get(k, {})
+            recorded_ts = file_meta.get("recordedTimestamp")
+            
+            # Parse date and time from recordedTimestamp if available
+            if recorded_ts:
+                try:
+                    # Parse ISO format timestamp (e.g., "2024-09-24T22:38:36+00:00")
+                    dt = datetime.fromisoformat(recorded_ts.replace("Z", "+00:00"))
+                    date = dt.strftime("%Y-%m-%d")  # Use date from recordedTimestamp
+                    time = dt.strftime("%H:%M:%S")  # Use time from recordedTimestamp
+                except (ValueError, AttributeError):
+                    # If parsing fails, keep filename-based date/time
+                    pass
+            
             file_record = {
                 "fullname": k,
                 "timestamp": timestamp,
-                "time": meta["time"],
+                "time": time,  # Use time from recordedTimestamp if available
                 "filename": meta["filename"],
                 "shimmer_device": meta["shimmer_device"],
                 "shimmer_day": meta["shimmer_day"],
@@ -383,6 +423,10 @@ def get_files_metadata() -> Dict[str, Any]:
                 "part": meta["part"],
                 "experiment_name": experiment_name
             }
+            if recorded_ts:
+                file_record["recordedTimestamp"] = recorded_ts
+            
+            # Group by date from recordedTimestamp (if available) or filename
             grouped[(device, date, pat)]["files"].append(file_record)
             grouped[(device, date, pat)]["patient"] = pat if (pat is not None and pat != "") else "none"
             grouped[(device, date, pat)]["experiment_name"] = experiment_name
