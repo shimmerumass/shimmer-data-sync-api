@@ -1134,6 +1134,21 @@ def get_combined_meta():
             shimmer_name = item.get("shimmer_device", "none")
             decode_s3_key = item.get("decode_s3_key", None)
             date = item.get("date", "none")
+            
+            # Parse date from filename if date is missing or invalid
+            full_file_name = item.get("full_file_name", "")
+            if (date == "none" or not date or date == "28-10" or len(date) < 10) and full_file_name:
+                # Parse date from filename: device__YYYYMMDD_HHMMSS__...
+                try:
+                    parts = full_file_name.split("__")
+                    if len(parts) > 1:
+                        timestamp = parts[1]
+                        if "_" in timestamp:
+                            ymd, hms = timestamp.split("_", 1)
+                            if len(ymd) == 8:
+                                date = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
+                except Exception:
+                    pass
 
             # Get patient
             patient = "none"
@@ -1222,11 +1237,14 @@ def get_combined_meta():
                     shimmer_type = "shimmer1"
 
                 # Decide new group or same group
+                # Use date from current record, not outer scope variable
+                rec_date = rec.get("date", "none")
+                
                 if curr_group is None:
                     group_id += 1
                     curr_group = {
                         "patient": patient,
-                        "date": date,
+                        "date": rec_date,  # Use date from current record
                         "device": device,
                         "group_id": f"group{group_id}",
                         "shimmer1": None,
@@ -1254,7 +1272,7 @@ def get_combined_meta():
                         curr_group = {
                             "patient": patient,
                             "device": device,
-                            "date": date,
+                            "date": rec_date,  # Use date from current record
                             "group_id": f"group{group_id}",
                             "shimmer1": None,
                             "shimmer2": None,
